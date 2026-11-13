@@ -46,6 +46,7 @@
 
 #include "task_runner.h"
 #include "plugin.h"
+#include "battery/battery_recorder.h"
 
 bool isN3DS;
 
@@ -272,6 +273,7 @@ int main(void)
     MyThread *taskRunnerThread = taskRunnerCreateThread();
     MyThread *errDispThread = errDispCreateThread();
     bootdiagCreateThread();
+    MyThread *batteryRecorderThread = BatteryRecorder_CreateThread();
 
     if (R_FAILED(ServiceManager_Run(services, notifications, NULL)))
         svcBreak(USERBREAK_PANIC);
@@ -282,6 +284,7 @@ int main(void)
 
     MyThread_Join(taskRunnerThread, -1LL);
     MyThread_Join(errDispThread, -1LL);
+    MyThread_Join(batteryRecorderThread, -1LL);
 
     return 0;
 }

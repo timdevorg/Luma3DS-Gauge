@@ -41,6 +41,7 @@
 #include "fmt.h"
 #include "process_patches.h"
 #include "luma_config.h"
+#include "battery/battery_menu.h"
 
 Menu rosalinaMenu = {
     "Rosalina menu",
@@ -53,6 +54,7 @@ Menu rosalinaMenu = {
         { "Process list", METHOD, .method = &RosalinaMenu_ProcessList },
         { "Debugger options...", MENU, .menu = &debuggerMenu },
         { "System configuration...", MENU, .menu = &sysconfigMenu },
+        { "Battery Manager...", MENU, .menu = &batteryMenu },
         { "Miscellaneous options...", MENU, .menu = &miscellaneousMenu },
         { "Save settings", METHOD, .method = &RosalinaMenu_SaveSettings },
         { "Return To HOME Menu", METHOD, .method = &RosalinaMenu_ReturnToHomeMenu },
