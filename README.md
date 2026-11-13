@@ -1,5 +1,11 @@
 # Luma3DS
 
+> [!IMPORTANT]
+> **This is Luma3DS-Gauge, an unofficial fork of [Luma3DS](https://github.com/LumaTeam/Luma3DS).** It is not affiliated with or supported by the Luma3DS team, so please don't report issues with this fork upstream.
+> It adds a **Battery Manager** to the Rosalina menu that learns the real discharge curve of aftermarket batteries and corrects the power LED. See [docs/battery-manager.md](docs/battery-manager.md).
+>
+> **AI disclosure:** the additions in this fork were made with the help of AI. See [AI disclosure](#ai-disclosure).
+
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/LumaTeam/Luma3DS/total)
 ![License](https://img.shields.io/badge/License-GPLv3-blue.svg)
 
@@ -90,6 +96,16 @@ To build Luma3DS, the following is needed:
     * while libctru and Luma3DS releases are kept in sync, you may have to build libctru from source for non-release Luma3DS commits
 
 While Luma3DS releases are bundled with `3ds-hbmenu`, Luma3DS actually compiles into one single file: `boot.firm`. Just copy it over to the root of your SD card ([ftpd](https://github.com/mtheall/ftpd) is the easiest way to do so), and you're done.
+
+## AI disclosure
+
+This applies to **Luma3DS-Gauge only**, meaning the Battery Manager and the related changes made in this fork. The upstream Luma3DS code was written by the Luma3DS team and its contributors, and this notice says nothing about how that code was made.
+
+- **What AI was used for:** research (hardware documentation, existing code), design, documentation, and writing code. The tool was [Claude Code](https://claude.com/claude-code) with Anthropic's Claude models.
+- **What the maintainer does:** decides what gets built, reviews all AI-assisted changes, and tests them on real hardware before release.
+- **How it is marked:** commits containing AI-assisted work carry a git trailer naming the AI model (for example `Co-Authored-By: Claude …`). Documents written with AI help say so at the top.
+
+AI-assisted work is held to the same standards as any other code: the maintainer is responsible for it, it must be understood, and it must be tested. If you find a problem, please open an issue on this fork, not upstream.
 
 ## Licensing
 This software is licensed under the terms of the GPLv3. You can find a copy of the license in the LICENSE.txt file.
