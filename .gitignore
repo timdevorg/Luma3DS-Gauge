@@ -22,3 +22,8 @@ exceptions/arm11/build
 
 Luma3DS*.zip
 hbmenu.zip
+
+# Battery Manager upload script
+scripts/.3ds-ip
+scripts/backups/
+.idea/
