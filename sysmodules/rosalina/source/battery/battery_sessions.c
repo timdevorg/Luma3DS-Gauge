@@ -89,6 +89,25 @@ Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len)
     return R_FAILED(res) ? res : res2;
 }
 
+Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len)
+{
+    Result res = BatteryFs_EnsureDirs();
+    if (R_SUCCEEDED(res))
+        res = BatteryFs_WriteWhole(tmpPath, data, len);
+    if (R_FAILED(res))
+        return res;
+
+    FS_Archive archive;
+    res = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
+    if (R_FAILED(res))
+        return res;
+
+    FSUSER_DeleteFile(archive, batteryPath(path)); // may not exist
+    res = FSUSER_RenameFile(archive, batteryPath(tmpPath), archive, batteryPath(path));
+    FSUSER_CloseArchive(archive);
+    return res;
+}
+
 static Result batteryFsReadAt(const char *path, bool tail, void *data, u32 len, u32 *outLen)
 {
     IFile file;

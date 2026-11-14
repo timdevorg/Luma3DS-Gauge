@@ -57,6 +57,9 @@ Result BatteryFs_EnsureDirs(void);
 Result BatteryFs_Append(const char *path, const void *data, u32 len);
 /// Replaces the whole file content.
 Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len);
+/// Power-cut safe replace: writes tmpPath (flushed), deletes path, renames tmpPath to path.
+/// Readers should fall back to tmpPath if path is missing or invalid.
+Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len);
 /// Reads up to len bytes ending at the end of the file (len bytes from offset size-len). Returns bytes read in *outLen.
 Result BatteryFs_ReadTail(const char *path, void *data, u32 len, u32 *outLen);
 /// Reads up to len bytes from the start of the file.

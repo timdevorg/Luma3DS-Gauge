@@ -9,7 +9,8 @@
 *   checksum). Run it through tests/battery/run_host_test.sh.
 *
 *   Usage: curve_host_test out.bin session.csv [...]
-*   The sessions are used as given (selection / classification is done by the caller).
+*   The sessions are used in ascending session-number order, like BatteryCurve_Build on the console
+*   (selection / classification is done by the caller).
 */
 
 #include <math.h>
@@ -153,6 +154,27 @@ int main(int argc, char **argv)
 
     u32 n = (u32)(argc - 2);
     u16 numbers[BATTERY_CURVE_MAX_SESSIONS];
+
+    // Sort the files by session number ("# session=NNNN"), like the console does
+    char **files = argv + 2;
+    u32 fileNumbers[BATTERY_CURVE_MAX_SESSIONS];
+    for (u32 i = 0; i < n; i++)
+    {
+        char line[256];
+        FILE *f = fopen(files[i], "r");
+        fileNumbers[i] = 0;
+        while (f != NULL && fgets(line, sizeof(line), f) != NULL && line[0] == '#')
+            if (strncmp(line, "# session=", 10) == 0)
+                fileNumbers[i] = (u32)atoi(line + 10);
+        if (f != NULL)
+            fclose(f);
+    }
+    for (u32 i = 1; i < n; i++)
+        for (u32 j = i; j > 0 && fileNumbers[j - 1] > fileNumbers[j]; j--)
+        {
+            u32 t = fileNumbers[j]; fileNumbers[j] = fileNumbers[j - 1]; fileNumbers[j - 1] = t;
+            char *p = files[j]; files[j] = files[j - 1]; files[j - 1] = p;
+        }
     double durations[BATTERY_CURVE_MAX_SESSIONS], first[BATTERY_CURVE_MAX_SESSIONS], last[BATTERY_CURVE_MAX_SESSIONS];
 
     // Pass 1: sum / min / max

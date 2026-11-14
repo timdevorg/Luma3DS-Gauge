@@ -165,7 +165,8 @@ typedef struct BatteryCurveBuildResult
     u16 rejectedNumbers[BATTERY_CURVE_MAX_SESSIONS];
 } BatteryCurveBuildResult;
 
-/// Builds the curve from the given sessions (two passes over the CSVs), writes it safely
+/// Builds the curve from the given sessions (any order; used in ascending session-number order, like
+/// scripts/build_curve.py, so curve.bin is byte-identical to the host's), writes it safely
 /// (curve.tmp, then rename to curve.bin) and loads it. Menu thread only (static buffers).
 bool BatteryCurve_Build(const u16 *numbers, u32 count, BatteryCurveProgressCb cb, BatteryCurveBuildResult *out);
 

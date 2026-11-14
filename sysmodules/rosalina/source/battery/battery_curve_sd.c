@@ -131,34 +131,24 @@ static Result batteryCurveFeedSession(u32 number, BatteryCurveSessionError *outE
     return res;
 }
 
-// curve.tmp -> delete curve.bin -> rename curve.tmp to curve.bin
-static Result batteryCurveWriteSafely(const BatteryCurveFile *f)
-{
-    Result res = BatteryFs_EnsureDirs();
-    if (R_SUCCEEDED(res))
-        res = BatteryFs_WriteWhole(BATTERY_CURVE_TMP_PATH, f, sizeof(*f));
-    if (R_FAILED(res))
-        return res;
-
-    FS_Archive archive;
-    res = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
-    if (R_FAILED(res))
-        return res;
-
-    FSUSER_DeleteFile(archive, fsMakePath(PATH_ASCII, BATTERY_CURVE_PATH)); // may not exist
-    res = FSUSER_RenameFile(archive, fsMakePath(PATH_ASCII, BATTERY_CURVE_TMP_PATH),
-                            archive, fsMakePath(PATH_ASCII, BATTERY_CURVE_PATH));
-    FSUSER_CloseArchive(archive);
-    return res;
-}
-
-bool BatteryCurve_Build(const u16 *numbers, u32 count, BatteryCurveProgressCb cb, BatteryCurveBuildResult *out)
+bool BatteryCurve_Build(const u16 *unsortedNumbers, u32 count, BatteryCurveProgressCb cb, BatteryCurveBuildResult *out)
 {
     bool used[BATTERY_CURVE_MAX_SESSIONS];
+    u16 numbers[BATTERY_CURVE_MAX_SESSIONS];
 
     memset(out, 0, sizeof(*out));
     if (count > BATTERY_CURVE_MAX_SESSIONS)
         count = BATTERY_CURVE_MAX_SESSIONS;
+
+    // Ascending session numbers (the menu lists newest first), so curve.bin doesn't depend on the
+    // selection order and is byte-identical to scripts/build_curve.py --bin for the same sessions.
+    for (u32 i = 0; i < count; i++)
+    {
+        u32 j = i;
+        for (; j > 0 && numbers[j - 1] > unsortedNumbers[i]; j--)
+            numbers[j] = numbers[j - 1];
+        numbers[j] = unsortedNumbers[i];
+    }
 
     // Pass 1: mean / min / max
     BatteryCurve_AccumInit(&g_buildAccum);
@@ -217,7 +207,8 @@ bool BatteryCurve_Build(const u16 *numbers, u32 count, BatteryCurveProgressCb cb
 
     BatteryCurve_FileFinalize(&g_buildFile);
 
-    out->res = batteryCurveWriteSafely(&g_buildFile);
+    // curve.tmp -> delete curve.bin -> rename curve.tmp to curve.bin
+    out->res = BatteryFs_WriteSafely(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, &g_buildFile, sizeof(g_buildFile));
     if (R_FAILED(out->res))
         return false;
     return BatteryCurve_Load();

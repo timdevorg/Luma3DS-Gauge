@@ -10,6 +10,9 @@ Usage:
         [--bin curve.bin] [--csv table.csv] [--svg plot.svg]
         [--include-high-end] [--include-incomplete] [--quiet]
 
+Accepts recorder CSV v1 and v2 (v2 appends corrected,led_desired,led_actual,reasserts; the
+columns used here are the first six, which are the same in both).
+
 Python 3, standard library only.
 
 AI disclosure: written with the help of AI (Claude Code), reviewed by the maintainer.
@@ -335,6 +338,9 @@ def main():
 
     if not used:
         sys.exit("no usable session")
+
+    # Ascending session numbers, like the console (BatteryCurve_Build): curve.bin doesn't depend on the order
+    used.sort(key=lambda s: s.number)
 
     curve = build(used)
     print("sessions used: %d, max spread: %s points, outliers: %d"
