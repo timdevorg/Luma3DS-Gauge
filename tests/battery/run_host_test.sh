@@ -5,9 +5,15 @@
 #
 # Compiles sysmodules/rosalina/source/battery/battery_curve.c natively (clang or cc),
 # builds a curve from the given CSVs with it and with scripts/build_curve.py, and checks:
-#   - both curve.bin files are byte-identical
+#   - both curve.bin files are byte-identical (sessions in ascending order, whatever the order given)
 #   - the printed summary / report values agree (within 0.01, C uses float for lookups)
 #   - the C self-checks pass (monotonic, continuous, checksum)
+# Then:
+#   - converts the CSVs to recorder v2 (extra LED columns) and checks that build_curve.py and
+#     the console's session parser / curve builder (battery_sessions.c, battery_curve_sd.c on
+#     host stubs, sd_host_test.c) treat v1 and v2 the same, and that BatteryCurve_Build with
+#     the sessions newest first gives the same curve.bin as build_curve.py
+#   - LED logic unit tests + replay of the sessions with that curve (led_host_test.c)
 #
 # GRAPH_OUT=<dir>: also renders the on-console graph (battery_graph.c) into
 # <dir>/graph_full.ppm, graph_zoom.ppm and graph_nocurve_full.ppm / _zoom.ppm.
@@ -22,13 +28,24 @@ OUT="${TMPDIR:-/tmp}/battery-host-test.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-[ $# -ge 1 ] || { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 CC="${CC:-$(command -v clang || command -v cc)}"
 "$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror \
     -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
     "$REPO/sysmodules/rosalina/source/battery/battery_curve.c" "$HERE/curve_host_test.c" \
     -lm -o "$OUT/curve_host_test"
+"$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror \
+    -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_curve.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_led_logic.c" "$HERE/led_host_test.c" \
+    -o "$OUT/led_host_test"
+"$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Wno-format \
+    -I "$HERE/host_sd" -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_curve.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_curve_sd.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_sessions.c" "$HERE/sd_host_test.c" \
+    -o "$OUT/sd_host_test"
 
 "$OUT/curve_host_test" "$OUT/c.bin" "$@" | tee "$OUT/c.txt"
 python3 "$REPO/scripts/build_curve.py" --quiet --include-high-end --include-incomplete \
@@ -70,6 +87,45 @@ for a, b in zip(c, p):
 print("report: C and build_curve.py agree" if bad == 0 else "report: %d differing lines" % bad)
 sys.exit(1 if bad else 0)
 PY
+
+# Recorder v2 copies + fake SD cards (v1 and v2) for the console's SD code
+numbers=()
+v2files=()
+for csv in "$@"; do
+    num=$(sed -n 's/^# session=\([0-9]*\).*/\1/p' "$csv" | head -1)
+    numbers+=("$num")
+    mkdir -p "$OUT/sd1/luma/battery/sessions" "$OUT/sd2/luma/battery/sessions"
+    cp "$csv" "$OUT/sd1/luma/battery/sessions/$num.csv"
+    python3 - "$csv" "$OUT/sd2/luma/battery/sessions/$num.csv" <<'PY'
+import sys
+out = open(sys.argv[2], "w")
+for line in open(sys.argv[1]):
+    line = line.rstrip("\r\n")
+    if line.startswith("# luma3ds-gauge recorder v1"):
+        line = "# luma3ds-gauge recorder v2"
+    elif line.startswith("t_ms,"):
+        line += ",corrected,led_desired,led_actual,reasserts"
+    elif line[:1].isdigit():
+        line += ",12.34,5,5,0"
+    out.write(line + "\n")
+PY
+    v2files+=("$OUT/sd2/luma/battery/sessions/$num.csv")
+done
+
+python3 "$REPO/scripts/build_curve.py" --quiet --include-high-end --include-incomplete \
+    --bin "$OUT/py_v2.bin" "${v2files[@]}" > /dev/null
+if cmp -s "$OUT/py.bin" "$OUT/py_v2.bin"; then
+    echo "build_curve.py: CSV v1 and v2 give the same curve.bin"
+else
+    echo "build_curve.py: CSV v1 and v2 give DIFFERENT curve.bin"
+    status=1
+fi
+
+echo
+"$OUT/sd_host_test" "$OUT/sd1" "$OUT/sd2" "$OUT/py.bin" "${numbers[@]}" || status=1
+echo
+"$OUT/led_host_test" "$OUT/py.bin" "$@" || status=1
+echo
 
 if [ -n "${GRAPH_OUT:-}" ]; then
     mkdir -p "$GRAPH_OUT"
