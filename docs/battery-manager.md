@@ -5,7 +5,9 @@ It adds a **Battery Manager** to the Rosalina menu that learns the real discharg
 curve of an aftermarket battery and corrects the power LED, so that red / blinking
 red only appear when the battery is actually low.
 
-> Status: milestone 2 (recorder) implemented, **not yet tested on hardware**.
+> Status: recorder (milestone 2) tested on hardware with one full discharge (session 0001,
+> [section 10](#10-findings-from-session-0001)). Curve builder + graph (milestone 3) implemented and
+> verified on the host against that session, **not yet tested on hardware**.
 > No MCU writes yet; LED control comes in later milestones.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
@@ -125,7 +127,8 @@ the LED back.
 - Files on SD:
   - `/luma/battery/config.ini`: settings
   - `/luma/battery/sessions/NNNN.csv`: one file per recorded discharge
-  - `/luma/battery/curve.bin`: built curve (101 points)
+  - `/luma/battery/curve.bin`: built curve (161-point MCU table + 81-point voltage table, [section 11](#11-curve-builder--graph-milestone-3))
+  - `/luma/battery/curve_select.ini`: which sessions the curve builder uses
 
 ### 4.2 Menu
 
@@ -155,12 +158,15 @@ Implementation details (milestone 2) are in [section 9](#9-recorder-implementati
 
 ### 4.4 Curve building (on console)
 
-- For each complete session: at each MCU % (0..100), compute
+- For each complete session: at each MCU % grid point, compute
   *real % = remaining runtime / total runtime*. This equals remaining charge
   as long as the load stays roughly constant.
 - Average the selected sessions point by point (**mean**). Warn when a session
   deviates strongly from the others (outlier flag).
 - Stream the CSVs line by line. Memory use stays small.
+- Session 0001 showed that 1 % MCU steps are far too coarse at the bottom and that the
+  MCU % stops moving at 1.000 %, so the implementation uses a non-uniform grid and a
+  voltage table for the last few percent. Details in [section 11](#11-curve-builder--graph-milestone-3).
 
 ### 4.5 LED control
 
@@ -200,9 +206,15 @@ Implementation details (milestone 2) are in [section 9](#9-recorder-implementati
 ## 6. Open questions (to answer with the logger)
 
 - [ ] Does the MCU re-assert the red LED after `0x29 = 5`? When (10/5/0 %, wake, charger)?
+  Still open: needs the LED milestone.
 - [ ] Does `0x29` survive sleep / wake?
-- [ ] At what MCU % / voltage does the console actually shut down?
-- [ ] Voltage scale: 5/256 or 5.12/256?
+- [x] At what MCU % / voltage does the console actually shut down?
+  **MCU 1.0 %, `volt_raw` 155** (3.03 V at 5/256, 3.10 V at 0.02), session 0001.
+- [x] Does `0x7F[0x0A]` track the red LED? **Yes**: 0 while blue, 1 when solid red, toggles
+  between samples while blinking (session 0001).
+- [x] Is a clean end line written when the console powers itself off at 0 %?
+  **Yes**: `# end reason=shutdown` (session 0001).
+- [ ] Voltage scale: 5/256 or 5.12/256? Still open (needs a multimeter reading).
 - [ ] What is `0x7F[5]` (RCOMP?) on this console?
 - [ ] How wide is the spread between light / normal / heavy sessions?
 
@@ -210,10 +222,12 @@ Implementation details (milestone 2) are in [section 9](#9-recorder-implementati
 
 1. **Build setup**: build vanilla v13.5 `boot.firm` locally. Needs `makerom` and `firmtool`.
 2. **Recorder**: background thread + Status / Start / Stop / Sessions. No writes to the MCU.
-   *Done (code complete, builds; awaiting on-device test).* See section 9.
-3. **LED experiment**: manual LED override toggle. Answers the open questions.
-4. **Curve builder + graph.**
-5. **Automatic LED control** from the curve.
+   *Done, tested on hardware (session 0001).* See sections 9 and 10.
+3. **Curve builder + graph** (originally planned after the LED experiment; done first because
+   the recorded data was ready). *Done (code complete, builds, host test matches
+   `build_curve.py`; awaiting on-device test).* See section 11.
+4. **LED experiment**: manual LED override toggle. Answers the open LED questions.
+5. **Automatic LED control** from the curve (`BatteryCurve_Corrected()`).
 6. Optional extras (4.6). Document findings on 3dbrew.
 
 ## 8. Sources
@@ -324,7 +338,8 @@ Recording **never** resumes automatically after boot.
 The session being recorded is shown as `recording` and can't be deleted.
 Note: a manual power-off also ends with `shutdown`, so a session you power off
 yourself at 60 % looks "complete". Check the end % in the list (it shows
-start % → end %); the curve builder (milestone 4) should also check it.
+start % → end %). The curve builder flags complete sessions ending above 5 % as
+"high end %" and leaves them unselected by default.
 
 Sessions list keys: Up/Down select, A details, X or Y delete (asks for confirmation), B back.
 It shows the 64 highest-numbered sessions, newest first. Opening it reads every CSV
@@ -350,9 +365,213 @@ Testing via `x_gauge.firm` first is safer: a plain boot still starts the old `bo
 ### 9.5 To verify on hardware
 
 - [ ] Status screen values match the Rosalina menu footer (%, voltage, temperature).
-- [ ] `0x7F[0x0A]` really follows the red LED.
-- [ ] `# end reason=shutdown` appears after a normal power-off, and after the console powers itself off at 0 %.
+- [x] `0x7F[0x0A]` really follows the red LED (session 0001).
+- [x] `# end reason=shutdown` appears after the console powers itself off at 0 % (session 0001).
+- [ ] `# end reason=shutdown` after a normal (manual) power-off.
 - [ ] `cutoff` recovery works after pulling the battery (or holding power).
 - [ ] Sleep (closing the lid) produces a `# sleep gap=` line (does `svcGetSystemTick` stop during sleep? the wall clock is used as a fallback).
 - [ ] Charger plug-in ends the session.
 - [ ] No noticeable effect on games (thread wakes once per second).
+
+## 10. Findings from session 0001
+
+First full discharge recorded with the recorder: New 3DS XL, iFixit battery, vendor code 0,
+mostly idle Animal Crossing. **7 h 28 min** (7.47 h), 2688 samples, started at MCU 97.8 %,
+ended with `# end reason=shutdown` when the console powered itself off.
+The first part was **active play** (heavier load, temperature 25 → 31 °C), the rest idle (back
+to 25–26 °C), so the load wasn't constant over the session.
+
+*Real %* is time-based: remaining runtime / total runtime.
+
+| MCU % | time left | real % (time-based) | volt (5/256) |
+|---|---|---|---|
+| 90 | 414.8 min | 92.6 | 3.926 |
+| 75 | 320.4 | 71.5 | 3.789 |
+| 50 | 231.3 | 51.6 | 3.633 |
+| 25 | 177.1 | 39.5 | 3.535 |
+| 10 (LED solid red) | 148.6 | 33.2 | 3.477 |
+| 5 (LED blinking) | 137.8 | 30.7 | 3.477 |
+| 3 | 111.2 | 24.8 | 3.418 |
+| 2 | 58.7 | 13.1 | 3.320 |
+| 1 | 17.5 | 3.9 | 3.223 |
+
+Conclusions:
+
+- **Top half is accurate**: within ~2 points at MCU 50 %.
+- **Bottom is compressed**: the MCU's last 5 % last **2 h 18 min ≈ 31 % of the runtime**.
+  The MCU's "empty" zone starts at ≈ 3.48 V while the iFixit cell still has ~30 % left there.
+- **LED**: solid red (`red_led=1`, `blue_led=0`) from MCU **10.9 %**, with ~2 h 30 min left
+  (2 h 31 min from the first sample with `red_led=1`). Blinking from **5.95 %**: `red_led`
+  toggles between samples.
+- **MCU % plateau**: the MCU % sat at exactly **1.000 for the final ~18 min**, so below about
+  2 % the MCU % alone can't tell how much is left.
+- **Shutdown** at `volt_raw` **155** (3.03 V at 5/256, 3.10 V at 0.02), MCU 1.0 %.
+- Sample interval 10.0–10.2 s, no gaps.
+
+## 11. Curve builder + graph (milestone 3)
+
+### 11.1 Code
+
+| File | Role |
+|---|---|
+| `sysmodules/rosalina/source/battery/battery_curve.c` | Pure math: CSV line parsing, per-session tables, combining, file checksum, lookup. No 3DS services, so it also compiles on the host. |
+| `sysmodules/rosalina/source/battery/battery_curve_sd.c` | Builds from session CSVs on SD (streamed line by line), safe write of `curve.bin`, loaded curve + lock, `curve_select.ini` |
+| `sysmodules/rosalina/source/battery/battery_graph.c` | Graph on the bottom screen, with minimal pixel / line helpers (Rosalina's `Draw_*` API only draws text) |
+| `sysmodules/rosalina/source/battery/battery_menu.c` | "Build curve" and "Show graph" entries, "Corrected" line in Status |
+| `scripts/build_curve.py` | Host reference implementation (Python 3, stdlib only) |
+| `tests/battery/` | Host test: compiles `battery_curve.c` natively and compares it with `build_curve.py` |
+
+No upstream (non-battery) files changed. The recorder thread loads `curve.bin` once after its
+5 s boot delay. Static RAM: about 12 KiB (two 2 KiB curve buffers, build state); no heap.
+
+### 11.2 Algorithm
+
+Per selected session, in one streaming pass over its CSV:
+
+- `pct = pct_int + pct_frac / 256` (exact; the `pct` text column is not used), `t = t_ms`,
+  `T_end` = `t_ms` of the last sample.
+- **MCU table**: for each grid point *g* (walking the grid downwards), the time *t(g)* when the
+  MCU % is **first ≤ g**, linearly interpolated between the previous sample (above *g*) and this
+  one. Grid points above the first sample get *t = 0* (real 100 %); grid points never reached
+  (below the shutdown %) get *t = T_end* (real 0 %). Then `real(g) = 100 * (T_end - t(g)) / T_end`.
+  "First time ≤ g" makes every session table monotonic by construction, also when the MCU %
+  briefly goes up again.
+- **Voltage table**: `volt_raw` is load-side and noisy, so it is smoothed with a **centered median
+  over 7 samples (~1 min)**, attributed to the middle sample's time. Then the same first-crossing
+  rule on the voltage grid.
+
+Combining (sessions in the order given):
+
+- per grid point: **mean** of the unrounded real % values, plus **min** and **max** (of the values
+  rounded to 0.01) for the spread band. Mean, min and max are monotonic (a final pass enforces it
+  anyway).
+- **Outliers** (second pass over the CSVs, only with ≥ 2 sessions): for each session the mean
+  absolute deviation over the MCU grid from the mean of the *other* sessions.
+  More than **5 points** → flagged as outlier (the curve is still written; deselect it and rebuild).
+- **Max spread**: largest max − min over the MCU grid.
+- Rejected: sessions with a sleep gap, fewer than 30 samples or shorter than 10 min.
+
+Session selection (Build curve list): only `complete` sessions are listed (the one being recorded
+is not). A complete session ending above **5 %** is marked `high end %` (probably powered off by
+hand) and unselected by default. Choices are saved in `/luma/battery/curve_select.ini`
+(`NNNN=1` / `NNNN=0` lines); sessions not in the file get the default.
+
+### 11.3 Grids, voltage fallback and lookup
+
+**MCU grid** (161 points): 0.0–5.0 % in 0.1 steps, 5.5–20 % in 0.5 steps, 21–100 % in 1 steps.
+Below 5 % one MCU % is worth up to ~12 real % (MCU 2 → 1 = 9 points), and the MCU % moves in steps
+of ~0.1–0.3 %, so 0.1 matches its resolution. 5–20 % is nearly flat in real % (5 → 10 % is
+only 2.5 points), and the top is close to linear, so coarser steps lose nothing.
+
+**Voltage grid** (81 points): `volt_raw` 140.5–220.5 in steps of 1 (half-integers). The smoothed
+voltage is an integer, so the first crossing of *v + 0.5* lies halfway between the last sample at
+*v + 1* and the first at *v*. A lookup at integer *v* therefore lands in the middle of the time the
+voltage sat at *v*. 140–220 covers this cell (155 at shutdown, ~205 when full) with margin.
+
+**Lookup** `BatteryCurve_Corrected(pct, voltRaw)` (thread-safe; −1 if no curve is loaded):
+
+```
+m = MCU table at pct           (linear interpolation, clamped)
+v = voltage table at voltRaw
+w = 0 for pct >= 3.0, 1 for pct <= 2.0, linear in between     (w = 0 if voltRaw <= 0)
+corrected = (1 - w) * m + w * min(v, m)
+```
+
+The voltage can only pull the estimate **down** (`min(v, m)`). With that, the result is
+continuous and monotonic in both inputs (it never increases when the MCU % or the voltage
+drops): with *w* falling as pct rises and *v ≤ m*, d/dpct = (1 − w)·m′ + (−w′)·(m − v) ≥ 0.
+In the 1.000 % plateau *m* stays at 3.9 % and the voltage takes over. Heavy load sags the
+voltage, which errs on the side of "lower". The LED milestone should pass a smoothed voltage
+(the argument is a float for that).
+
+Status shows `Corrected: xx.x%` (instantaneous `volt_raw`) once a curve is loaded.
+
+### 11.4 `curve.bin` format (version 1)
+
+`struct BatteryCurveFile` in `include/battery/battery_curve.h`, written as-is (little endian,
+2024 bytes). Real % values are `u16` in hundredths (0–10000).
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u32 | magic `0x56524342` ("BCRV") |
+| 4 | u16 | version (1) |
+| 6 | u16 | number of sessions used (1–16) |
+| 8 | u16 | flags (bit0: voltage table valid) |
+| 10 | u16 | MCU points (161) |
+| 12 | u16 | voltage points (81) |
+| 14 | u16 | max spread ×100 |
+| 16 | u16 | number of outliers |
+| 18 | u16[16] | session numbers used (0-padded) |
+| 50 | u16[16] | per-session deviation ×100 |
+| 82 | u16[161] ×4 | MCU grid (% ×10), mean, min, max |
+| 1370 | u16[81] ×4 | voltage grid (`volt_raw` ×10), mean, min, max |
+| 2018 | u16 | reserved (0) |
+| 2020 | u32 | CRC-32 (zlib polynomial) of bytes 0–2019 |
+
+The loader checks magic, version, point counts, ascending grids and the CRC.
+
+**Safe write**: the curve goes to `curve.tmp` (flushed), then `curve.bin` is deleted and
+`curve.tmp` renamed to `curve.bin`. After a power cut at any point there is either a valid
+`curve.bin`, or a valid `curve.tmp` that the loader uses instead (or the old curve.bin plus an
+invalid curve.tmp, which is ignored).
+
+### 11.5 Menu
+
+- **Build curve**: checkbox list of complete sessions, newest first:
+  `>[x] 0001   7:28 end   1.0% in curve`. Flags: `high end %` (red), `outlier` / `in curve`
+  (from the loaded curve). Up/Down select, **A** toggles, **X** or **START** builds, **B** back
+  (the selection is saved). Building shows "Building... Pass n/2: session #NNNN (i of n)", then a
+  summary: sessions used, max spread, outliers with each session's deviation, and the real % at
+  MCU 50 / 25 / 10 / 5 / 2 / 1 %. At most 16 sessions per curve.
+- **Show graph**: bottom screen. X = MCU %, Y = real %. Grey diagonal = stock, bright green =
+  learned mean, dark green band = min..max. **Y** toggles the zoom (MCU 0–10 %, real 0–50 %),
+  **B** back. Without a curve it shows the axes, the diagonal and a hint.
+
+### 11.6 Host tools
+
+```sh
+# Tables, report and optional outputs
+scripts/build_curve.py sessions/0001.csv [more.csv ...] [--bin curve.bin] [--csv table.csv] [--svg plot.svg]
+#   --include-high-end    use complete sessions ending above 5 %
+#   --include-incomplete  use sessions that aren't "complete"
+#   --quiet               summary + report only
+
+# Host test: C (battery_curve.c, compiled with clang) vs build_curve.py
+tests/battery/run_host_test.sh sessions/0001.csv [more.csv ...]
+GRAPH_OUT=/tmp/graph tests/battery/run_host_test.sh sessions/0001.csv   # also renders the graph to PPM
+```
+
+The host test checks that both produce a **byte-identical `curve.bin`**, that the report values
+agree, and that the corrected % is monotonic and continuous over a pct × voltage sweep, and that
+corrupted files are rejected. A `--svg` plot writes `plot.svg` and `plot_zoom.svg`.
+
+Result on session 0001 (curve built from that session alone, so it reproduces its own
+time-based real % by construction; this checks the math, not the prediction quality):
+
+| Sample | MCU % | `volt_raw` | real % (time) | MCU table | corrected |
+|---|---|---|---|---|---|
+| first ≤ 50 % | 49.680 | 186 | 51.62 | 51.48 | 51.48 |
+| first ≤ 25 % | 24.441 | 181 | 39.52 | 39.29 | 39.29 |
+| first ≤ 10 % | 9.719 | 178 | 33.16 | 33.10 | 33.10 |
+| first ≤ 5 % | 4.793 | 178 | 30.74 | 30.73 | 30.73 |
+| first ≤ 3 % | 2.996 | 175 | 24.82 | 24.76 | 24.76 |
+| first ≤ 2 % | 1.992 | 170 | 13.10 | 13.03 | 13.03 |
+| first ≤ 1 % | 1.000 | 165 | 3.91 | 3.91 | 3.91 |
+| 15 min before end | 1.000 | 164 | 3.31 | 3.91 | 3.02 |
+| 10 min before end | 1.000 | 162 | 2.20 | 3.91 | 2.08 |
+| 5 min before end | 1.000 | 159 | 1.08 | 3.91 | 0.93 |
+| 2 min before end | 1.000 | 157 | 0.41 | 3.91 | 0.34 |
+| last sample | 1.000 | 155 | 0.00 | 3.91 | 0.00 |
+
+In the plateau the MCU table alone is stuck at 3.9 %, while the voltage fallback follows the
+real remaining charge down to 0.
+
+### 11.7 To verify on hardware
+
+- [ ] Build curve from session 0001: summary matches the table above (MCU 10 % → 33.1 %).
+- [ ] `curve.bin` on SD is byte-identical to `scripts/build_curve.py --bin` on the same CSV.
+- [ ] Build time and UI: progress screen updates, no freeze; menu stays responsive afterwards.
+- [ ] Graph: layout, colours and zoom on the real screen.
+- [ ] Status shows "Corrected" after a reboot (curve loaded by the recorder thread at boot).
+- [ ] Selection survives a reboot (`curve_select.ini`).
+- [ ] No effect on the recording session / games (Rosalina RAM use grew by ~12 KiB static).
