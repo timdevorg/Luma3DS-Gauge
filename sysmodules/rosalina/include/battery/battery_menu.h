@@ -15,3 +15,5 @@ void BatteryMenu_Status(void);
 void BatteryMenu_StartRecording(void);
 void BatteryMenu_StopRecording(void);
 void BatteryMenu_Sessions(void);
+void BatteryMenu_BuildCurve(void);
+void BatteryMenu_ShowGraph(void);

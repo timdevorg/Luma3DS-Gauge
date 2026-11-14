@@ -24,6 +24,7 @@
 #include "battery/battery_mcu.h"
 #include "battery/battery_sessions.h"
 #include "battery/battery_recorder.h"
+#include "battery/battery_curve.h"
 
 #define BATTERY_THREAD_PRIORITY     58 // same as the task runner, lowest of Rosalina's threads
 #define BATTERY_THREAD_STACK_SIZE   0x1000
@@ -433,6 +434,8 @@ static void batteryRecorderThreadMain(void)
     if (svcWaitSynchronization(preTerminationEvent, BATTERY_BOOT_DELAY_MS * 1000000LL) == 0)
         return;
 
+    BatteryCurve_Load(); // for the Status screen (and the LED control later)
+
     LightLock_Lock(&g_rec.lock);
     if (!g_rec.recording) // else the user was faster than the boot delay and the state file is current
         batteryRecoverCutoffSessionLocked();
@@ -455,6 +458,7 @@ static void batteryRecorderThreadMain(void)
 MyThread *BatteryRecorder_CreateThread(void)
 {
     BatteryMcu_Init();
+    BatteryCurve_Init();
     LightLock_Init(&g_rec.lock);
 
     if (R_FAILED(MyThread_Create(&g_recorderThread, batteryRecorderThreadMain, g_recorderThreadStack,
