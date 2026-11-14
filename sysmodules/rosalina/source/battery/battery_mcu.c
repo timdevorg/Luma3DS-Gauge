@@ -9,7 +9,15 @@
 *   our own local Handle and raw IPC instead of libctru's global mcuHwc handle, so
 *   we can never clobber or close a session that menu.c / sysconfig.c /
 *   luma_config.c opened through mcuHwcInit()/mcuHwcGetSessionHandle().
-*   A LightLock serialises our own users (recorder thread and menu thread).
+*   A LightLock serialises our own users (recorder thread, LED thread, menu thread,
+*   notification handler).
+*
+*   Write path: BatteryMcu_SetPowerLedMode() is the only function that sends a write
+*   request. It is hard-wired to reg 0x29, size 1, and to the mode whitelist
+*   (docs/battery-manager.md, section 12.2). It uses WriteRegister (IPC 0x00020082)
+*   with size 1, i.e. exactly one byte to 0x29, rather than mcu::HWC SetPowerLedState
+*   (IPC 0x00060080), because what the MCU sysmodule does internally for the latter is
+*   not documented.
 */
 
 #include <3ds.h>
@@ -131,6 +139,7 @@ Result BatteryMcu_ReadSample(BatteryMcuSample *out)
             out->flags       = regs[7];
         }
 
+        out->ledModeValid = R_SUCCEEDED(batteryMcuRawRead(h, BATTERY_MCU_REG_POWER_LED, &out->ledMode, 1));
         out->infoValid = R_SUCCEEDED(batteryMcuRawRead(h, BATTERY_MCU_REG_INFO_TABLE, out->info, sizeof(out->info)));
         batteryMcuClose(h);
     }
@@ -138,23 +147,26 @@ Result BatteryMcu_ReadSample(BatteryMcuSample *out)
     return res;
 }
 
-Result BatteryMcu_WriteRegister(u8 reg, const void *data, u32 size)
+Result BatteryMcu_SetPowerLedMode(u8 mode)
 {
-    // Whitelist (docs/battery-manager.md, section 3): power LED mode byte only.
-    if (reg != BATTERY_MCU_REG_POWER_LED || size != 1 || data == NULL)
+    // Whitelist (docs/battery-manager.md, sections 3 and 12.2): reg 0x29, mode byte only, known modes only.
+    if (!BatteryMcu_LedModeAllowed(mode))
         return -2;
+
+    static u8 s_mode; // IPC buffer, static so it isn't on the caller's stack (written under the lock)
 
     Handle h;
     batteryMcuLock();
     Result res = batteryMcuOpen(&h);
     if (R_SUCCEEDED(res))
     {
+        s_mode = mode;
         u32 *cmdbuf = getThreadCommandBuffer();
         cmdbuf[0] = IPC_MakeHeader(MCUHWC_CMD_WRITE_REGISTER, 2, 2);
-        cmdbuf[1] = reg;
-        cmdbuf[2] = size;
-        cmdbuf[3] = IPC_Desc_Buffer(size, IPC_BUFFER_R);
-        cmdbuf[4] = (u32)data;
+        cmdbuf[1] = BATTERY_MCU_REG_POWER_LED;
+        cmdbuf[2] = 1;
+        cmdbuf[3] = IPC_Desc_Buffer(1, IPC_BUFFER_R);
+        cmdbuf[4] = (u32)&s_mode;
 
         res = svcSendSyncRequest(h);
         if (R_SUCCEEDED(res))

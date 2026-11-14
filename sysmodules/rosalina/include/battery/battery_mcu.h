@@ -21,6 +21,19 @@
 
 #define BATTERY_MCU_INFO_TABLE_SIZE     0x13
 
+// Power LED modes (reg 0x29, mode byte). Only these may ever be written (BatteryMcu_SetPowerLedMode).
+#define BATTERY_MCU_LED_AUTO            0 // "anything else = automatic mode" (3dbrew)
+#define BATTERY_MCU_LED_BLUE_FORCED     1 // forced default blue
+#define BATTERY_MCU_LED_RED             4 // blue off, red on
+#define BATTERY_MCU_LED_BLUE            5 // red off, blue on
+#define BATTERY_MCU_LED_BLINK_RED       6 // animate blue off, flash red
+
+static inline bool BatteryMcu_LedModeAllowed(u32 mode)
+{
+    return mode == BATTERY_MCU_LED_AUTO || mode == BATTERY_MCU_LED_BLUE_FORCED || mode == BATTERY_MCU_LED_RED ||
+           mode == BATTERY_MCU_LED_BLUE || mode == BATTERY_MCU_LED_BLINK_RED;
+}
+
 typedef struct BatteryMcuSample
 {
     u8 slider3d;     // 0x08
@@ -31,21 +44,24 @@ typedef struct BatteryMcuSample
     u8 voltageRaw;   // 0x0D, 3dbrew: raw * 5 / 256 V (Rosalina: raw * 0.02 V)
     u8 flags;        // 0x0F
     bool infoValid;  // info[] could be read
-    u8 info[BATTERY_MCU_INFO_TABLE_SIZE]; // 0x7F: [2] battery vendor, [3..4] MGIC version, [5] RCOMP, [0x0A] red LED
+    u8 info[BATTERY_MCU_INFO_TABLE_SIZE]; // 0x7F: [2] battery vendor, [3..4] MGIC version, [5] RCOMP, [0x0A] red LED, [0x0B] blue LED
+    bool ledModeValid; // ledMode could be read
+    u8 ledMode;      // 0x29, first (mode) byte. A "dynamic" register: may not read back what was written
 } BatteryMcuSample;
 
 /// Must be called once before any other function (from main(), before threads start).
 void BatteryMcu_Init(void);
 
-/// Reads 0x08..0x0F (one read) and the 0x7F info table (one read) using a short-lived session.
+/// Reads 0x08..0x0F (one read), the 0x29 mode byte and the 0x7F info table using one short-lived session.
 Result BatteryMcu_ReadSample(BatteryMcuSample *out);
 
 /// Generic read. Refuses ranges touching 0x05-0x07 (unlock sequence) or 0x10-0x13 (interrupt bitmask).
 Result BatteryMcu_ReadRegister(u8 reg, void *data, u32 size);
 
-/// Generic write, whitelisted: refuses anything but a 1-byte write to 0x29 (power LED mode).
-/// NOT called anywhere yet (milestone 2 performs no MCU writes).
-Result BatteryMcu_WriteRegister(u8 reg, const void *data, u32 size);
+/// The ONLY MCU write in the Battery Manager: writes the 1-byte mode of reg 0x29 (power LED).
+/// Refuses any mode not in BatteryMcu_LedModeAllowed(). The 4 red-pattern bytes are never written.
+/// Callers: battery_led.c only.
+Result BatteryMcu_SetPowerLedMode(u8 mode);
 
 /// Converts the raw voltage byte to millivolts (3dbrew scale, 5/256 V per unit).
 static inline u32 BatteryMcu_VoltageMv(u8 raw)

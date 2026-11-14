@@ -47,6 +47,7 @@
 #include "task_runner.h"
 #include "plugin.h"
 #include "battery/battery_recorder.h"
+#include "battery/battery_led.h"
 
 bool isN3DS;
 
@@ -140,6 +141,7 @@ static void handleTermNotification(u32 notificationId)
 
 static void handleSleepNotification(u32 notificationId)
 {
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED back to automatic before sleep
     ptmSysmInit();
     s32 ackValue = ptmSysmGetNotificationAckValue(notificationId);
     switch (notificationId)
@@ -168,6 +170,7 @@ static void handleShellNotification(u32 notificationId)
 {
     // Quick dirty fix
     Sleep__HandleNotification(notificationId);
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED (lid closed / opened)
 
     if (notificationId == 0x213) {
         // Shell opened
@@ -186,6 +189,7 @@ static void handleShellNotification(u32 notificationId)
 static void handlePreTermNotification(u32 notificationId)
 {
     (void)notificationId;
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED back to automatic first
     // Might be subject to a race condition, but heh.
 
     miniSocUnlockState(true);
@@ -246,6 +250,9 @@ static const ServiceManagerNotificationEntry notifications[] = {
     { PTMNOTIFID_FULLY_WAKING_UP,   handleSleepNotification                 },
     { PTMNOTIFID_FULLY_AWAKE,       handleSleepNotification                 },
     { PTMNOTIFID_HALF_AWAKE,        handleSleepNotification                 },
+    { PTMNOTIFID_SHUTDOWN,          BatteryLed_HandleNotification           }, // Battery Manager
+    { PTMNOTIFID_BATTERY_VERY_LOW,  BatteryLed_HandleNotification           }, // Battery Manager
+    { PTMNOTIFID_BATTERY_LOW,       BatteryLed_HandleNotification           }, // Battery Manager
     { 0x213,                        handleShellNotification                 },
     { 0x214,                        handleShellNotification                 },
     { 0x1000,                       handleNextApplicationDebuggedByForce    },
@@ -274,6 +281,7 @@ int main(void)
     MyThread *errDispThread = errDispCreateThread();
     bootdiagCreateThread();
     MyThread *batteryRecorderThread = BatteryRecorder_CreateThread();
+    MyThread *batteryLedThread = BatteryLed_CreateThread();
 
     if (R_FAILED(ServiceManager_Run(services, notifications, NULL)))
         svcBreak(USERBREAK_PANIC);
@@ -285,6 +293,7 @@ int main(void)
     MyThread_Join(taskRunnerThread, -1LL);
     MyThread_Join(errDispThread, -1LL);
     MyThread_Join(batteryRecorderThread, -1LL);
+    MyThread_Join(batteryLedThread, -1LL);
 
     return 0;
 }

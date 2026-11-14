@@ -3,6 +3,7 @@
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
 *   Battery Manager: background discharge recorder (milestone 2). Reads the MCU only.
+*   CSV v2 (milestone 4) adds the LED columns.
 */
 
 #pragma once
@@ -38,6 +39,7 @@ typedef struct BatteryRecorderStatus
     u32 writeErrors;
     Result lastWriteRes;
     u16 recoveredNumber; // session closed as "cutoff" at boot, 0 if none
+    u32 reassertBase;    // LED re-assert counter (per boot) at the start of the session
 } BatteryRecorderStatus;
 
 /// Creates the recorder thread (call once from main()).
