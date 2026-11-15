@@ -509,8 +509,9 @@ static void menuDraw(Menu *menu, u32 selected)
 
         // Temperature is padded to 3 chars in both units (F >= 32, so at least 2 digits) so that the string length
         // doesn't change when the unit is toggled or when going above 99F
-        // Battery Manager (docs/battery-manager.md, section 15): with a curve, the corrected % ("c73.4%") after the
-        // MCU %, single spaces; the string is right-aligned in a fixed 26-char field so a shorter one clears the old
+        // Battery Manager (docs/battery-manager.md, section 15): with a curve, the corrected % after the MCU %,
+        // separated by a one-char arrow (CP437 0x1A), e.g. "25*C 3.85V 72.4%>69.9%" with '>' for the arrow; at most 25
+        // chars ("100*F 4.20V 100.0%>100.0%"); right-aligned in a fixed 26-char field so a shorter one clears the old
         BatteryLedStatus led;
         BatteryLed_GetStatus(&led);
         char buf[48];
@@ -518,7 +519,7 @@ static void menuDraw(Menu *menu, u32 selected)
         {
             u32 c10 = (u32)(led.corrected * 10.0f + 0.5f);
             sprintf(
-                buf, fahrenheit ? "%d\xF8""F %lu.%02luV %lu.%lu%% c%lu.%lu%%" : "%02d\xF8""C %lu.%02luV %lu.%lu%% c%lu.%lu%%",
+                buf, fahrenheit ? "%d\xF8""F %lu.%02luV %lu.%lu%%\x1A""%lu.%lu%%" : "%02d\xF8""C %lu.%02luV %lu.%lu%%\x1A""%lu.%lu%%",
                 temperature, voltageInt, voltageFrac, percentageInt, percentageFrac, c10 / 10, c10 % 10
             );
         }

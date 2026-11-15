@@ -11,6 +11,7 @@
 #include "draw.h"
 #include "fmt.h"
 #include "memory.h"
+#include "luma_config.h"
 #include "battery/battery_menu.h"
 #include "battery/battery_mcu.h"
 #include "battery/battery_recorder.h"
@@ -175,7 +176,10 @@ void BatteryMenu_Status(void)
             else
                 y = batteryMenuLine(y, COLOR_WHITE, "Corrected:      no curve yet");
             y = batteryMenuLine(y, COLOR_WHITE, "Voltage:        %lu.%03luV (raw %lu)", mv / 1000, mv % 1000, (u32)s.voltageRaw);
-            y = batteryMenuLine(y, COLOR_WHITE, "Temp: %lu\xF8""C  Adapter: %s  Charging: %s", (u32)s.temperature,
+            // Same unit and rounding as the Rosalina footer (menu.c)
+            bool fahrenheit = (lumaMcuConfig.flags & MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT) != 0;
+            u32 temp = fahrenheit ? (9 * (u32)s.temperature + 2) / 5 + 32 : (u32)s.temperature;
+            y = batteryMenuLine(y, COLOR_WHITE, "Temp: %lu\xF8%c  Adapter: %s  Charging: %s", temp, fahrenheit ? 'F' : 'C',
                                 adapter ? "yes" : "no", charging ? "yes" : "no");
             if (s.infoValid)
                 y = batteryMenuLine(y, COLOR_WHITE, "Vendor: %lu  RCOMP: 0x%02lx  MGIC: %lu.%lu",
@@ -191,9 +195,12 @@ void BatteryMenu_Status(void)
         }
 
         // LED control
-        y = batteryMenuLine(y, led.cfg.override ? COLOR_GREEN : COLOR_WHITE, "LED override:   %s  (%s%s)",
-                            led.cfg.override ? "ON" : "OFF", BatteryLedLogic_ReasonName(led.reason),
-                            led.fastPolling ? ", fast poll" : "");
+        if (led.reason == BATTERY_LED_REASON_OFF)
+            y = batteryMenuLine(y, COLOR_WHITE, "LED control:    OFF%s", led.fastPolling ? "  (fast poll)" : "");
+        else
+            y = batteryMenuLine(y, led.cfg.override ? COLOR_GREEN : COLOR_WHITE, "LED control:    %s  (%s%s)",
+                                led.cfg.override ? "ON" : "OFF", BatteryLedLogic_ReasonName(led.reason),
+                                led.fastPolling ? ", fast poll" : "");
         if (R_SUCCEEDED(res) && s.ledModeValid)
             y = batteryMenuLine(y, COLOR_WHITE, "LED desired:    %-9s actual(0x29): %lu",
                                 BatteryLedLogic_ModeName(led.desired), (u32)s.ledMode);
@@ -241,15 +248,16 @@ void BatteryMenu_Status(void)
         else
             y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm patch: %s, writes %lu",
                                 ptmName, ptm.writes);
-        // ptm battery bars (section 15): "fed L=3 (shared 3)", "fed L=3 (charging, held, shared 3)", "stock (off), shared 5", "off: ...". "shared" is
+        // ptm battery bars (section 15): "fed L=3 (shared 3)", "fed L=3 (held), shared 3" (charging), "stock (off), shared 5, w 6",
+        // "off: ...", each at most 49 chars (BATTERY_MENU_LINE_CHARS) with up to 4-digit write counts. "shared" is
         // ptm's level in the shared page (0x1FF81085 bits 2..4, read only), updated at ptm's own timer tick
         u32 shared = (OS_SharedConfig->led_battery >> 2) & 7;
         if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED && led.barsReason == BATTERY_BARS_REASON_CHARGING)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (charging, held, shared %lu), writes %lu", (u32)bars.movsCur, shared, bars.writes);
+            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (held), shared %lu, writes %lu", (u32)bars.movsCur, shared, bars.writes);
         else if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED)
             y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (shared %lu), writes %lu", (u32)bars.movsCur, shared, bars.writes);
         else if (bars.state == BATTERY_BARS_STATE_OK)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: stock (%s), shared %lu, writes %lu",
+            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: stock (%s), shared %lu, w %lu",
                                 BatteryBars_ReasonName(led.barsReason), shared, bars.writes);
         else if (bars.state == BATTERY_BARS_STATE_UNCHECKED)
             y = batteryMenuLine(y, COLOR_WHITE, "bars patch: not checked yet, shared %lu", shared);
@@ -640,8 +648,11 @@ static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r)
         {
             char line[64];
             int n = sprintf(line, "Skipped (too short / sleep):");
-            for (u32 k = 0; k < r->rejected && n < 44; k++)
+            u32 k = 0;
+            for (; k < r->rejected && n + 6 <= BATTERY_MENU_LINE_CHARS - 4; k++) // leave room for " ..."
                 n += sprintf(line + n, " #%04lu", (u32)r->rejectedNumbers[k]);
+            if (k < r->rejected)
+                sprintf(line + n, " ...");
             batteryMenuLine(y + SPACING_Y, COLOR_RED, "%s", line);
         }
 
@@ -741,7 +752,7 @@ void BatteryMenu_BuildCurve(void)
                 i == selected ? '>' : ' ', c->selected ? 'x' : ' ', (u32)c->number, m / 60, m % 60, e / 10, e % 10, flag);
         }
 
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "A: toggle  X/START: build  B: back");
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "A: select  X: build  B: back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
 
@@ -789,12 +800,12 @@ void BatteryMenu_ShowGraph(void)
         Draw_ClearFramebuffer();
         if (curve != NULL)
             Draw_DrawFormattedString(10, 10, COLOR_TITLE, "Battery curve, %lu session(s)%s",
-                                     (u32)curve->numSessions, zoom ? ", MCU 0-10%" : "");
+                                     (u32)curve->numSessions, zoom ? ", stock 0-10%" : "");
         else
             Draw_DrawString(10, 10, COLOR_TITLE, "Battery curve");
         BatteryGraph_Draw(curve, zoom);
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 18, COLOR_TITLE, zoom ? "Y: full view  B: back" : "Y: zoom 0-10%  B: back");
-        Draw_DrawString(SCREEN_BOT_WIDTH - 4 - 19 * SPACING_X, SCREEN_BOT_HEIGHT - 18, COLOR_WHITE, "x: MCU %, y: real %");
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, zoom ? "Y: full view  B: back" : "Y: zoom 0-10%  B: back");
+        Draw_DrawString(SCREEN_BOT_WIDTH - 4 - 19 * SPACING_X, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "x: stock, y: real %");
         Draw_FlushFramebuffer();
         Draw_Unlock();
 
@@ -834,15 +845,15 @@ void BatteryMenu_LedOverride(void)
         {
             y = batteryMenuLine(y, COLOR_GREEN, "LED override is now ON.");
             y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "Corrected %% above %lu%%: blue (mode %lu)", (u32)cfg.redPct, (u32)cfg.blueMode);
-            y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: solid red", (u32)cfg.redPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: blinking red", (u32)cfg.blinkPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Charging: only gets better. Lid closed:");
-            y = batteryMenuLine(y, COLOR_WHITE, "Sleep LED %s if blue. Power off: mode 3.", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
+            y = batteryMenuLine(y, COLOR_WHITE, "Corrected battery above %lu %%: blue", (u32)cfg.redPct);
+            y = batteryMenuLine(y, COLOR_WHITE, "%lu %% or less: solid red", (u32)cfg.redPct);
+            y = batteryMenuLine(y, COLOR_WHITE, "%lu %% or less: blinking red", (u32)cfg.blinkPct);
+            y = batteryMenuLine(y, COLOR_WHITE, "Always blue while charging.");
+            y = batteryMenuLine(y, COLOR_WHITE, "Lid closed: Sleep LED setting (%s).", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
             if (!haveCurve)
             {
                 y += SPACING_Y;
-                y = batteryMenuLine(y, COLOR_RED, "No curve yet: the LED stays automatic");
+                y = batteryMenuLine(y, COLOR_RED, "No curve yet: the LED stays stock");
                 y = batteryMenuLine(y, COLOR_RED, "until you build one.");
             }
         }
@@ -850,8 +861,8 @@ void BatteryMenu_LedOverride(void)
         {
             y = batteryMenuLine(y, COLOR_WHITE, "LED override is now OFF.");
             y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "The power LED is back to automatic");
-            y = batteryMenuLine(y, COLOR_WHITE, "(the MCU decides).");
+            y = batteryMenuLine(y, COLOR_WHITE, "The power LED is back to stock");
+            y = batteryMenuLine(y, COLOR_WHITE, "(the console decides).");
         }
         if (R_FAILED(res))
         {
@@ -882,17 +893,19 @@ void BatteryMenu_SleepLed(void)
         u32 y = 30;
         y = batteryMenuLine(y, COLOR_GREEN, "Sleep LED is now: %s", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
         y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed, override on: this LED at a");
-        y = batteryMenuLine(y, COLOR_WHITE, "blue level or while charging. With dim/");
-        y = batteryMenuLine(y, COLOR_WHITE, "bright: red level solid red, blinking level");
-        y = batteryMenuLine(y, COLOR_WHITE, "the MCU's own low warning.");
+        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed: this LED while the battery is");
+        y = batteryMenuLine(y, COLOR_WHITE, "above the red level or charging; steady red");
+        y = batteryMenuLine(y, COLOR_WHITE, "at the red level, the console's own warning");
+        y = batteryMenuLine(y, COLOR_WHITE, "when blinking.");
+        if (!cfg.override)
+            y = batteryMenuLine(y, COLOR_RED, "No effect while LED override is OFF.");
         y += SPACING_Y;
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "dim:    dimmed blue while asleep (default)");
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "bright: full-brightness blue while asleep");
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "off:    stock behaviour, nothing written");
         y += SPACING_Y;
         y = batteryMenuLine(y, COLOR_WHITE, "Select this entry again for the next one.");
-        y = batteryMenuLine(y, COLOR_WHITE, "Status shows the \"Sleep:\" and \"ptm\" lines.");
+        y = batteryMenuLine(y, COLOR_WHITE, "Status: the \"Sleep:\" and \"ptm\" lines.");
         if (R_FAILED(res))
         {
             y += SPACING_Y;
@@ -926,14 +939,14 @@ void BatteryMenu_Bars(void)
             y = batteryMenuLine(y, COLOR_GREEN, "Battery bars are now: corrected");
             y += SPACING_Y;
             y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu's battery icon follows the");
-            y = batteryMenuLine(y, COLOR_WHITE, "corrected %% instead of the MCU's:");
+            y = batteryMenuLine(y, COLOR_WHITE, "corrected %% instead of the stock gauge:");
             y = batteryMenuLine(y, COLOR_WHITE, "4 bars from %lu%%, 3 bars from %lu%%,", (u32)cfg.bars4Pct, (u32)cfg.bars3Pct);
             y = batteryMenuLine(y, COLOR_WHITE, "2 bars above %lu%% (the red LED threshold),", (u32)cfg.redPct);
             y = batteryMenuLine(y, COLOR_WHITE, "1 red bar at red, blinking red bar at");
             y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less (blinking LED threshold).", (u32)cfg.blinkPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Stock while charging, without a curve or");
-            y = batteryMenuLine(y, COLOR_WHITE, "on MCU read errors. HOME Menu picks it up");
-            y = batteryMenuLine(y, COLOR_WHITE, "at ptm's next tick (Status: \"bars\" line).");
+            y = batteryMenuLine(y, COLOR_WHITE, "Held while charging. Stock without a curve");
+            y = batteryMenuLine(y, COLOR_WHITE, "or on read errors. HOME Menu shows a change");
+            y = batteryMenuLine(y, COLOR_WHITE, "within about 8 s.");
             if (!haveCurve)
             {
                 y += SPACING_Y;
@@ -945,8 +958,8 @@ void BatteryMenu_Bars(void)
         {
             y = batteryMenuLine(y, COLOR_WHITE, "Battery bars are now: stock");
             y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "ptm's own mapping of the MCU %% is back");
-            y = batteryMenuLine(y, COLOR_WHITE, "(its code bytes are restored).");
+            y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu shows the console's own bars");
+            y = batteryMenuLine(y, COLOR_WHITE, "again (from the stock gauge).");
         }
         if (R_FAILED(res))
         {
