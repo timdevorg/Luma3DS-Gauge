@@ -7,9 +7,11 @@ red only appear when the battery is actually low.
 
 > Status: recorder (milestone 2) and curve builder + graph (milestone 3) tested on hardware
 > (sessions 0001 and 0002, [section 10](#10-findings-from-session-0001)).
-> LED control (milestone 4, [section 12](#12-led-control-milestone-4)) implemented and host-tested,
-> **not yet tested on hardware**. It is the first code that writes to the MCU (reg `0x29`, mode byte
-> only) and is **off** until you switch it on in the menu.
+> LED control (milestone 4, [section 12](#12-led-control-milestone-4)) tested on hardware (LED test,
+> override on); four issues found there (lid, charger, boot, power off) are fixed in
+> [section 13](#13-on-device-results-and-refinements-milestone-4b), **not yet re-tested on hardware**.
+> It is the only code that writes to the MCU (reg `0x29`, mode byte only) and is **off** until you
+> switch it on in the menu.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -625,11 +627,13 @@ battery frame on the LED thread is ~100 bytes, so 2 KiB leaves ample room for th
 
 - **One function writes to the MCU**: `BatteryMcu_SetPowerLedMode(u8 mode)` in `battery_mcu.c`. It is
   hard-wired to register `0x29`, size **1** (the mode byte; the 4 red-pattern bytes are never written),
-  and refuses any mode outside **{0, 1, 4, 5, 6}** (0 automatic, 1 forced blue, 4 red on / blue off,
-  5 red off / blue on, 6 blink red). Modes 2 (sleep) and 3 (power off) belong to the system and are
-  refused. The old generic `BatteryMcu_WriteRegister()` was removed.
+  and refuses any mode outside **{0, 1, 2, 3, 4, 5, 6}** (0 automatic, 1 forced blue, 2 sleep animation,
+  3 "power off", 4 red on / blue off, 5 red off / blue on, 6 blink red), i.e. exactly the modes 3dbrew
+  documents. (Until section 13, 2 and 3 were refused.) The old generic `BatteryMcu_WriteRegister()` was
+  removed.
 - Its only caller is `batteryLedWriteLocked()` in `battery_led.c` (used by the thread, the notification
-  hook and the LED test screen). Verified on the build: `nm` / `objdump` of `rosalina.elf` show one
+  hook, the shutdown latch and the LED test screen), which first asks the shutdown latch
+  (`BatteryLedGate_Allow`, section 13.5). Verified on the build: `nm` / `objdump` of `rosalina.elf` show one
   `bl BatteryMcu_SetPowerLedMode` (from `batteryLedWriteLocked`) and one `WriteRegister` IPC header
   (`0x00020082`) in battery code. The other `MCUHWC_WriteRegister` calls in the binary are upstream
   Rosalina's (`0x28` LED brightness, `0x18` IRQ mask for the power button option, `0x60` in
@@ -644,7 +648,8 @@ battery frame on the LED thread is ~100 bytes, so 2 KiB leaves ample room for th
   the same register. The mcu::RTC command `0x002E0000` "SetPowerModeIndicatorState" was not used:
   mcu::RTC is ptm's session, and the header (no parameters) looks wrong.
 - "Automatic" (0) is only ever written to undo our own earlier write: if nothing was written this boot,
-  nothing is written (also not at boot, sleep or shutdown).
+  nothing is written (also not at boot, sleep or shutdown). Since section 13, sleep and shutdown no
+  longer write automatic at all.
 
 ### 12.3 Behaviour
 
@@ -652,15 +657,21 @@ The corrected % is `BatteryCurve_Corrected(pct, median voltage)`. The voltage me
 6 samples, taken every **10 s** (about 1 min, like the 7-sample median the voltage table was built
 with). The voltage only matters at MCU ≤ 3 %, where it changes over tens of minutes.
 
+Updated by section 13 (charging, lid, shutdown):
+
 | Condition | Mode written |
 |---|---|
-| override off, no curve, adapter / charging, lid closed or sleep requested, shutdown, control error | automatic (0), once, and only if we had written something else |
+| override off, no curve, control error | automatic (0), once, and only if we had written something else |
+| adapter / charging | as below, from the MCU-table corrected %, level only gets better (13.3) |
+| lid closed or sleep requested | blue → 2 (sleep animation); red / blinking kept; nothing if nothing written this boot (13.2) |
+| shutdown | 3 ("power off") once if we own the LED, then nothing (13.5) |
 | corrected > red threshold (default 10 %) | `blue_mode` (default 5, or 1) |
 | blink threshold (default 3 %) < corrected ≤ red threshold | 4 (solid red) |
 | corrected ≤ blink threshold | 6 (blinking red) |
 
 - **Only gets worse**: within one discharge the level goes blue → red → blinking, never back, so the
-  voltage recovering after a load drop can't make the LED flap. Plugging in the charger resets it.
+  voltage recovering after a load drop can't make the LED flap. Unplugging the charger restarts it from
+  the corrected % at that moment (13.3).
 - **Hysteresis (0.5 points)**: after a settings change (thresholds, blue mode, override switched on) the
   level is re-evaluated once and may get better, but only if the corrected % is more than 0.5 above the
   threshold (e.g. red → blue after lowering X from 10 to 8 at 9.0 %, but not at 8.3 %). Raising a
@@ -710,6 +721,10 @@ with). The voltage only matters at MCU ≤ 3 %, where it changes over tens of mi
 
 ### 12.5 Sleep, wake and shutdown
 
+> Changed after the on-device test: sleep writes the sleep animation / keeps red, shutdown writes
+> "power off" once and nothing after ([13.2](#132-sleep-issue-1), [13.5](#135-shutdown-issue-4)).
+> The table below is the original milestone 4 behaviour.
+
 Rosalina's notification thread (main.c) calls `BatteryLed_HandleNotification()`; the write happens
 **synchronously** there, before the system can continue:
 
@@ -745,14 +760,15 @@ blue_mode=5
 
 Missing file or keys = defaults (so the override is **off** after the first install). Written by the
 menu only, safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
-`config.tmp`). Loaded by the LED thread 6 s after boot, or earlier when a menu entry needs it.
+`config.tmp`). Loaded by the LED thread as soon as the SD card can be opened (13.4), or earlier when a
+menu entry needs it.
 
 ### 12.7 Menu
 
 - **LED override: ON/OFF** (title shows the state): toggles and saves, shows what it means.
 - **Thresholds**: Up/Down select, Left/Right change: solid red X %, blinking Y % (Y < X enforced), blue
   mode 5 / 1. B saves (only if changed).
-- **LED test**: Up/Down select a mode (0/1/4/5/6), A writes it; shows what was written, the `0x29`
+- **LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
   read-back and the red / blue state (refreshed 4× per second). Normal control pauses while the
   screen is open and is restored on exit.
 - **Status**: corrected % (the LED's input, with the median voltage), override state + reason
@@ -761,7 +777,7 @@ menu only, safely like `curve.bin` (`config.tmp`, delete, rename; the loader fal
 
 ### 12.8 Host tests
 
-`tests/battery/run_host_test.sh sessions/0001.csv sessions/0002.csv` now also runs:
+`tests/battery/run_host_test.sh` (see 13.7 for running it without session CSVs) now also runs:
 
 - `led_host_test`: unit tests (thresholds, only-worse, hysteresis after threshold edits, charger reset,
   lid closed / shutdown / override off / no curve / error → automatic, mismatch rules incl. grace,
@@ -799,6 +815,8 @@ times in session 0001 (voltage recovery in the plateau) and 2 times in 0002.
 
 ### 12.10 On-device test checklist
 
+Superseded by [13.8](#138-on-device-checklist); results of this first run in 13.1.
+
 1. Status: override shows **OFF**, reason `override off`, nothing written (`Written: none yet`).
 2. **LED test** first: write 1, 4, 5, 6, then 0. Check the LED for each, note the `0x29` read-back and the
    red / blue values (answers "does the read-back work?"). Leave the screen: LED back to normal.
@@ -815,3 +833,151 @@ times in session 0001 (voltage recovery in the plateau) and 2 times in 0002.
 10. Later in the session: solid red at corrected ≤ 10 %, blinking at ≤ 3 %, never back to blue.
 11. Afterwards: check `led_desired`, `led_actual`, `reasserts` in the CSV, and that the Sessions list
     and Build curve still read it (CSV v2).
+
+## 13. On-device results and refinements (milestone 4b)
+
+### 13.1 Results of the first on-device test
+
+Console: New 3DS XL, iFixit battery. At the time the MCU thought the battery was low (MCU 2.9 %,
+corrected 23.3 %) and blinked red in automatic mode.
+
+LED test screen:
+
+| Mode written | Result | `0x29` read-back | Red / blue (`0x7F`) | LED |
+|---|---|---|---|---|
+| 0 | 0 | 0 | off / 0 (sampled while the MCU blinks low) | MCU's low-battery blinking |
+| 1 | 0 | 1 | | blue |
+| 4 | 0 | 4 | | red |
+| 5 | 0 | 5 | | blue |
+| 6 | 0 | 6 | red off (off phase of the blink) | blink red; from 5, blue fades over the first 1–2 blinks ("animate blue off") |
+
+The read-back of `0x29` always equalled the written value, so the read-back check becomes "trusted".
+
+- **Override on** at MCU 2.9 % / corrected 23.3 %: solid blue, stays blue, re-asserts 0 boot / 0 session.
+  The MCU does not fight the override.
+- **Notification (RGB) LED**: its low-battery red blinking stops while the override is on. It follows the
+  power LED mode; nothing extra is needed for it.
+- **Issues found**:
+  1. Lid closed → handed back to automatic → the MCU showed its low-battery red blinking instead of a
+     sleep indication. Lid open → blue again (good).
+  2. Charger plugged in → automatic → red. Wanted: the corrected state while charging too.
+  3. Boot → the MCU blinks red from power-on until the LED thread took over (6 s after Rosalina start).
+  4. Power off → the normal power-off animation, **then** ~2 s of red flashing, then off. Cause: the
+     pre-termination hand-back wrote automatic (0) after the system had set its power-off indication.
+
+### 13.2 Sleep (issue 1)
+
+On `0x214` (lid closed) and `0x101` (sleep requested) the notification hook writes, synchronously:
+
+| LED level | Written |
+|---|---|
+| blue | **2** (sleep animation) |
+| solid red | nothing (4 stays) |
+| blinking red | nothing (6 stays) |
+
+Never automatic. Nothing at all if the override is off, there is no curve, control is in the error state,
+or nothing was written this boot (last written = none / automatic). The thread uses the same mapping
+(fallback if `0x214` is missed: `0x0F` bit1 clear), and the mismatch watch ignores mode 2.
+On wake (`0x213`, `0x102`, `0x106`) the thread is kicked and writes the normal mode again, as before.
+
+**Red vs. blink during sleep: kept as is.** The stock LED also shows low battery instead of the sleep
+animation; blinking uses less LED power than solid red, which matters while asleep; and switching
+blink → solid red on every lid close and back on open would be confusing. It also means no write at all
+during sleep entry when the LED is red.
+
+### 13.3 Charging (issue 2)
+
+The LED stays under control while the adapter is plugged in (`0x0F` bit3, or bit4):
+
+- Corrected % from the curve's **MCU table only** (no voltage blend: the voltage is elevated while charging).
+- The level starts from the discharge level and may only get **better** during one charge (red → blue,
+  with the 0.5-point hysteresis), never worse. Booting on the charger (or a threshold change while
+  charging) starts from the corrected % as it is.
+- Fully charged (adapter in, charging flag clear, MCU ≥ 95 %): blue.
+- Unplugged: the voltage median is reset (no charging voltages in it) and the discharge logic restarts from
+  the corrected % at that moment, in either direction; from there it only gets worse again.
+- The `0x7F` / `0x29` mismatch watch keeps running. Status reason: `charging`.
+- Override off / no curve: unchanged (automatic only to undo our own write, else nothing).
+
+### 13.4 Boot (issue 3)
+
+The 5 s (recorder) and 6 s (LED) delays were arbitrary ("give the SD / FS time"). What they actually
+waited for:
+
+- **fs:USER** is already usable: Rosalina's own init calls `fsInit()` before `main()`.
+- **The SD card** (`ARCHIVE_SDMC`) may not be openable yet right after Rosalina starts.
+- **mcu::HWC** is registered only once the mcu sysmodule has been launched (after Rosalina, which is
+  started with the KIPs); `batteryMcuOpen()` already checks `isServiceUsable("mcu::HWC")`.
+- The recorder loading `curve.bin` before the LED thread started (no longer needed: the LED thread loads it).
+
+Now: the LED thread checks `BatteryFs_SdReady()` (open + close the SD archive) every **200 ms** (at most
+30 s, then defaults), loads `curve.bin` and `config.ini`, and then polls the MCU every **200 ms** until
+the first read succeeds (for up to 30 s, then the normal cadence). The first poll with the override on
+writes the mode at once. The recorder waits for the SD the same way, then does the cut-off recovery under
+its lock (unchanged; it touches only `state` and the session CSV, the LED thread only `curve.bin` /
+`config.ini`, so they don't race).
+
+Expected takeover: about as soon as the mcu sysmodule is up plus ≤ 200 ms, estimated **~1–2 s after
+Rosalina starts** (was ≥ 6 s). Not measured yet: Status shows a line `Boot s: Rosalina X SD Y 1st LED Z`
+(seconds since the ARM11 tick counter started, ≈ power-on) when there are no write failures. The red
+blinking before Rosalina runs (boot ROM, boot9strap, Luma, kernel start) is unavoidable: nothing of ours
+runs then, and the MCU is in automatic after a power cycle.
+
+### 13.5 Shutdown (issue 4)
+
+A one-way latch, `BatteryLedGate` (pure code, host-tested), sits in front of every write:
+
+- The **first** shutdown signal — `0x108` (ptm shutdown), `0x2000` (pre-termination) or the thread's exit
+  path, whichever comes first — reads `0x29` and writes **3** ("power off") once, if we own the LED
+  (last written mode is ours: not none, not automatic, not 3) and `0x29` doesn't already read 3. If the
+  system has already set 3, nothing is written. If nothing was written this boot, nothing is written.
+- After that the gate is closed: pre-termination, the thread exit, the error retry, the menu and the LED
+  test screen can't write anything (no automatic that would override the system's power-off indication).
+- Decision on "override active": the condition used is "we own the LED". With the override on that is
+  the same; in the short window after switching the override off (before the thread writes automatic)
+  or after the LED test screen, writing 3 is still better than leaving our mode or writing 0.
+- Risk: on a **reboot** without `0x108`, mode 3 is written at pre-termination. If the MCU keeps it over
+  the reboot, the LED may stay in "power off" mode until our thread writes again (~1–2 s after Rosalina
+  start with the override on). To check on hardware (13.8).
+
+### 13.6 Code
+
+| File | Change |
+|---|---|
+| `battery_mcu.h` | whitelist 0..6, `BATTERY_MCU_LED_SLEEP` / `_POWER_OFF` |
+| `battery_led_logic.c/.h` | charge ratchet, `levelValid` / `onCharger`, sleep mapping, `KEEP` (write nothing), `NeedsWrite`, `BatteryLedGate` |
+| `battery_led.c/.h` | sleep / shutdown hooks, MCU-table corrected % on the adapter, boot readiness, boot timing in Status |
+| `battery_recorder.c` | SD readiness instead of 5 s delay; no longer loads `curve.bin` |
+| `battery_sessions.c/.h` | `BatteryFs_SdReady()` |
+| `battery_menu.c` | LED test modes 2 and 3, boot timing line, texts |
+
+`led_desired` in the CSV may now be 2, 3 or 254 (`keep`: nothing to write). Still exactly one MCU write
+function: `nm` / `objdump` show one `bl BatteryMcu_SetPowerLedMode` (from `batteryLedWriteLocked`), one
+battery `0x00020082` header; `batteryLedWriteLocked` is called from the thread, the notification hook,
+`batteryLedShutdownLocked` and the LED test.
+
+### 13.7 Host tests
+
+Session CSVs now live in `sessions/` at the repo root (gitignored). `tests/battery/run_host_test.sh`
+without arguments uses `sessions/0001.csv` + `0002.csv` if both exist; otherwise it runs the unit tests
+only (LED logic, safe write) and prints that the curve comparison, session parsing and replay are
+**skipped**. New unit tests: sleep → 2 / red / blink by level, wake resumes, sleep with nothing written,
+charging only-better ratchet, unplug restart, full charge blue, charging with override off / no curve,
+mismatch watch while charging, shutdown writes 3 exactly once and nothing after (pre-termination, thread
+exit, menu, test screen), 0x29 already 3, nothing written when nothing was written this boot, whitelist
+rejects 7 and other values. With the earlier session CSVs the replay is unchanged (2 LED changes per
+session, same times as in 12.8).
+
+### 13.8 On-device checklist
+
+1. **LED test 2 and 3 first**: write 5, then 2 (sleep animation?), then 3 (what does "power off" look
+   like: fade, off?). Note the `0x29` read-back. Then 0 and leave the screen.
+2. Override on: Status `active`, blue; note the `Boot s:` line after a cold boot (expected 1st LED
+   ~1–2 s after Rosalina).
+3. **Lid** close → sleep animation (blue level) instead of red blinking; open → blue within ~1 s.
+4. **Charger** plugged in → stays blue (Status `charging`); with a red level it may turn blue once the
+   MCU-table corrected % is 0.5 above the threshold; never worse. Unplug → normal discharge logic.
+5. **Boot** (cold, override on): red blinking only until shortly after Rosalina starts.
+6. **Power off** from HOME → the normal power-off animation, **no** red flashing after it.
+7. **Reboot** (Rosalina menu → Reboot) → LED back to normal on the next boot.
+8. Later: run `tests/battery/run_host_test.sh` with the session CSVs in `sessions/`.
