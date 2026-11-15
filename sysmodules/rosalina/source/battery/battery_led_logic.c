@@ -25,8 +25,7 @@ void BatteryLedConfig_Defaults(BatteryLedConfig *cfg)
 
 static bool batteryLedSleepSettingValid(u8 m)
 {
-    return m == BATTERY_LED_MODE_BLUE || m == BATTERY_LED_MODE_BLUE_FORCED || m == BATTERY_LED_MODE_SLEEP ||
-           m == BATTERY_LED_SLEEP_SYSTEM;
+    return m == BATTERY_LED_MODE_BLUE || m == BATTERY_LED_MODE_BLUE_FORCED || m == BATTERY_LED_SLEEP_SYSTEM;
 }
 
 void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg)
@@ -39,7 +38,9 @@ void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg)
         cfg->blinkPct = cfg->redPct - 1;
     if (cfg->blueMode != BATTERY_LED_MODE_BLUE && cfg->blueMode != BATTERY_LED_MODE_BLUE_FORCED)
         cfg->blueMode = BATTERY_LED_DEFAULT_BLUE_MODE;
-    if (!batteryLedSleepSettingValid(cfg->sleepMode))
+    if (cfg->sleepMode == BATTERY_LED_MODE_SLEEP)
+        cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // legacy anim(2): same stock ptm behaviour as off
+    else if (!batteryLedSleepSettingValid(cfg->sleepMode))
         cfg->sleepMode = BATTERY_LED_DEFAULT_SLEEP_MODE;
 }
 
@@ -51,10 +52,20 @@ bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
         const char *eq = p;
         while (*eq != 0 && *eq != '=' && *eq != '\n')
             eq++;
-        if (*eq == '=' && (u32)(eq - p) == 10 && strncmp(p, "sleep_mode", 10) == 0 && strncmp(eq + 1, "system", 6) == 0 &&
-            (eq[7] == 0 || eq[7] == '\n' || eq[7] == '\r' || eq[7] == ' ' || eq[7] == '#'))
+        u32 wordLen = 0;
+        if (*eq == '=' && (u32)(eq - p) == 10 && strncmp(p, "sleep_mode", 10) == 0)
         {
-            cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // the word form of sleep_mode=0
+            if (strncmp(eq + 1, "system", 6) == 0)
+                wordLen = 6;
+            else if (strncmp(eq + 1, "anim", 4) == 0)
+                wordLen = 4;
+            char t = wordLen != 0 ? eq[1 + wordLen] : 'x';
+            if (!(t == 0 || t == '\n' || t == '\r' || t == ' ' || t == '#'))
+                wordLen = 0;
+        }
+        if (wordLen != 0)
+        {
+            cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // legacy words "system" / "anim": off (stock ptm)
             any = true;
         }
         else if (*eq == '=' && *p != '#' && eq[1] >= '0' && eq[1] <= '9')
@@ -137,8 +148,8 @@ u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level)
 
 u8 BatteryLedLogic_SleepModeForLevel(const BatteryLedConfig *cfg, u8 level)
 {
-    // Blue: the Sleep LED setting. Default 5 (blue on, red off): the MCU's sleep animation (2) picks the red
-    // LED when the MCU itself thinks the battery is low (section 13.9). "system" writes nothing.
+    // Blue: the Sleep LED setting. Default dim (1): ptm's sleep fade dims it; bright (5): full blue.
+    // off (0): stock ptm, nothing is written.
     // Red / blinking red are kept: the stock LED also shows low battery instead of the sleep animation,
     // blinking uses less LED power than solid red, and switching blink -> solid red on every lid close would
     // only be confusing.
@@ -155,8 +166,8 @@ u8 BatteryLedLogic_SleepModeForLevel(const BatteryLedConfig *cfg, u8 level)
 
 u8 BatteryLedLogic_SleepLevel(const BatteryLedConfig *cfg, u8 level, bool charger)
 {
-    // Charging at sleep entry: blue while asleep with Sleep LED blue(5) / blue(1), whatever the level (the ptm
-    // sleep byte follows the same rule, section 14). anim(2) / system: the level as it is.
+    // Charging at sleep entry: blue while asleep with Sleep LED dim / bright, whatever the level (the ptm
+    // sleep byte follows the same rule, section 14). off: the level as it is.
     if (charger && (cfg->sleepMode == BATTERY_LED_MODE_BLUE || cfg->sleepMode == BATTERY_LED_MODE_BLUE_FORCED))
         return BATTERY_LED_LEVEL_BLUE;
     return level;
@@ -177,10 +188,9 @@ const char *BatteryLedLogic_SleepSettingName(u8 sleepMode)
 {
     switch (sleepMode)
     {
-        case BATTERY_LED_MODE_BLUE:         return "blue(5)";
-        case BATTERY_LED_MODE_BLUE_FORCED:  return "blue(1)";
-        case BATTERY_LED_MODE_SLEEP:        return "anim(2)";
-        case BATTERY_LED_SLEEP_SYSTEM:      return "system";
+        case BATTERY_LED_MODE_BLUE:         return "bright blue";
+        case BATTERY_LED_MODE_BLUE_FORCED:  return "dim blue";
+        case BATTERY_LED_SLEEP_SYSTEM:      return "off (stock)";
         default:                            return "other";
     }
 }
@@ -189,10 +199,9 @@ u8 BatteryLedLogic_NextSleepSetting(u8 sleepMode)
 {
     switch (sleepMode)
     {
-        case BATTERY_LED_MODE_BLUE:         return BATTERY_LED_MODE_BLUE_FORCED;
-        case BATTERY_LED_MODE_BLUE_FORCED:  return BATTERY_LED_MODE_SLEEP;
-        case BATTERY_LED_MODE_SLEEP:        return BATTERY_LED_SLEEP_SYSTEM;
-        default:                            return BATTERY_LED_MODE_BLUE;
+        case BATTERY_LED_MODE_BLUE_FORCED:  return BATTERY_LED_MODE_BLUE;      // dim -> bright
+        case BATTERY_LED_MODE_BLUE:         return BATTERY_LED_SLEEP_SYSTEM;   // bright -> off
+        default:                            return BATTERY_LED_MODE_BLUE_FORCED; // off -> dim
     }
 }
 

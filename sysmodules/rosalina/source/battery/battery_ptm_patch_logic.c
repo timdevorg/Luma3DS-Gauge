@@ -50,8 +50,8 @@ void BatteryPtmPatch_DesiredBytes(const BatteryLedConfig *cfg, u8 sleepDesired, 
 {
     u8 s = BATTERY_PTM_SLEEP_STOCK, w = BATTERY_PTM_WAKE_STOCK;
 
-    // Override off, no curve, error, shutdown, no data, LED test (reason not "lid closed"), or Sleep LED anim(2) /
-    // system: ptm stays stock in both callbacks
+    // Override off, no curve, error, shutdown, no data, LED test (reason not "lid closed"), or Sleep LED off:
+    // ptm stays stock in both callbacks
     bool sleepBlue = cfg->sleepMode == BATTERY_LED_MODE_BLUE || cfg->sleepMode == BATTERY_LED_MODE_BLUE_FORCED;
     if (sleepReason == BATTERY_LED_REASON_SHELL && sleepBlue)
     {

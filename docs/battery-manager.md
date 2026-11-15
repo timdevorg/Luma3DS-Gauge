@@ -678,7 +678,7 @@ Updated by section 13 (charging, lid, shutdown):
 |---|---|
 | override off, no curve, control error | automatic (0), once, and only if we had written something else |
 | adapter / charging | as below, from the MCU-table corrected %, level only gets better (13.3) |
-| lid closed or sleep requested | blue, or charging with Sleep LED blue(5) / blue(1) → Sleep LED setting (default 5; 1, 2, or nothing for `system`, 12.11); red / blinking kept; nothing if nothing written this boot (13.2, 13.9, 14.2) |
+| lid closed or sleep requested | blue, or charging with Sleep LED dim / bright → Sleep LED setting (default dim = 1; bright = 5; nothing for off, 12.11); red / blinking kept; nothing if nothing written this boot (13.2, 13.9, 14.2) |
 | shutdown | 3 ("power off") once if we own the LED, then nothing (13.5) |
 | corrected > red threshold (default 10 %) | `blue_mode` (default 5, or 1) |
 | blink threshold (default 3 %) < corrected ≤ red threshold | 4 (solid red) |
@@ -766,8 +766,8 @@ led_override=0
 red_pct=10
 blink_pct=3
 blue_mode=5
-# sleep_mode: 5 blue on/red off, 1 forced blue, 2 MCU sleep animation, 0 system (write nothing)
-sleep_mode=5
+# sleep_mode: 1 dim blue (default), 5 bright blue, 0 off (stock ptm, write nothing)
+sleep_mode=1
 ```
 
 | Key | Default | Range |
@@ -776,7 +776,7 @@ sleep_mode=5
 | `red_pct` | 10 | 1–50 |
 | `blink_pct` | 3 | 0 to `red_pct` − 1 |
 | `blue_mode` | 5 | 5 (red off, blue on) or 1 (forced default blue) |
-| `sleep_mode` | 5 | 5, 1, 2 or 0 / `system` (12.11); anything else (3, 4, 6, 7, 255, `-1`, text) = 5 |
+| `sleep_mode` | 1 | 1 (dim), 5 (bright) or 0 (off); legacy `2`, `system`, `anim` = 0 (12.11); anything else (3, 4, 6, 7, 255, `-1`, text) = 1 |
 
 Missing file or keys = defaults (so the override is **off** after the first install). Written by the
 menu only, safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
@@ -786,8 +786,8 @@ menu entry needs it.
 ### 12.7 Menu
 
 - **LED override: ON/OFF** (title shows the state): toggles and saves, shows what it means.
-- **Sleep LED: blue(5) / blue(1) / anim(2) / system** (title shows the setting): each selection moves to
-  the next value (5 → 1 → 2 → system → 5), saves `config.ini` and shows what it means (12.11).
+- **Sleep LED: dim blue / bright blue / off (stock)** (title shows the setting): each selection moves to
+  the next value (dim → bright → off → dim), saves `config.ini` and shows what it means (12.11).
 - **Thresholds**: Up/Down select, Left/Right change: solid red X %, blinking Y % (Y < X enforced), blue
   mode 5 / 1. B saves (only if changed).
 - **LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
@@ -860,16 +860,18 @@ Superseded by [13.8](#138-on-device-checklist); results of this first run in 13.
 ### 12.11 Sleep LED setting (`sleep_mode`)
 
 What the sleep hook writes when the lid closes (`0x214`) or sleep is requested (`0x101`) while the
-override is on and the level is **blue**, or while **charging** with `blue(5)` / `blue(1)` (any level):
+override is on and the level is **blue**, or while **charging** with dim / bright (any level):
 
-| `sleep_mode` | Menu | Written at sleep (blue level) |
-|---|---|---|
-| `5` (default) | `blue(5)` | 5: blue on, red off |
-| `1` | `blue(1)` | 1: forced default blue |
-| `2` | `anim(2)` | 2: the MCU's sleep animation (the milestone 4b behaviour; red when the MCU thinks the battery is low, 13.9) |
-| `0` or the word `system` | `system` | nothing: the LED is left to the system / MCU. `0` here never means "write automatic"; the menu saves it as `0` |
+| `sleep_mode` | Menu | Written at sleep (blue level / charging) | While asleep (on device) |
+|---|---|---|---|
+| `1` (default) | `Sleep LED: dim blue` | 1 (ptm sleep byte `01`) | dim blue: mode 1 follows ptm's sleep brightness 50 |
+| `5` | `Sleep LED: bright blue` | 5 (ptm sleep byte `05`) | full-brightness blue (mode 5 ignores `0x28`) |
+| `0` | `Sleep LED: off (stock)` | nothing; ptm stays stock (`02` / `00`) | stock behaviour (MCU sleep animation, red when the MCU thinks the battery is low) |
 
-- Missing key, a missing file, or an invalid value: 5.
+- Legacy values: `2` (the former `anim(2)` option), `system` and `anim` parse to `0` (off): with the ptm
+  patch they all gave the same stock behaviour. The menu saves `1` / `5` / `0`. `0` here never means
+  "write automatic".
+- Missing key, a missing file, or an invalid value: 1 (dim). Earlier default was 5.
 - At the **first** sleep signal of a sleep the configured mode is written even if the LED should already
   show it (5 after 5), so the MCU has been told exactly that value right before sleep. A second signal of
   the same sleep (`0x101` after `0x214`) writes only if the mode isn't there yet.
@@ -877,8 +879,8 @@ override is on and the level is **blue**, or while **charging** with `blue(5)` /
   error state, during shutdown, or if nothing was written this boot; shutdown latch, hysteresis and the
   "only gets worse" rule. The write goes through `batteryLedWriteLocked` → `BatteryMcu_SetPowerLedMode`
   like every other (whitelist, gate).
-- **Charging** (adapter or charging flag at sleep entry) with `blue(5)` / `blue(1)`: the configured blue
-  mode, whatever the level (`BatteryLedLogic_SleepLevel`). With `anim(2)` / `system` the level counts as
+- **Charging** (adapter or charging flag at sleep entry) with dim / bright: the configured blue
+  mode, whatever the level (`BatteryLedLogic_SleepLevel`). With off the level counts as
   it is. Edge case: unplugged during sleep, the LED stays blue until the lid opens (14.2).
 - **No re-assert while the lid is closed** (changed in 14.6): earlier, 5 / 1 were watched for mismatches
   while closed. Now the thread writes nothing while sleep is pending and doesn't re-assert while the lid
@@ -887,9 +889,9 @@ override is on and the level is **blue**, or while **charging** with `blue(5)` /
   `BatteryLedLogic_SleepWrite()` in `battery_led_logic.c` (host-tested); `batteryLedSleepLocked()` in
   `battery_led.c`.
 - ptm sends its own power LED mode later in its sleep routine (stock 2) and again on wake (stock 0). With
-  `blue(5)` / `blue(1)` both bytes in ptm follow the corrected level at sleep entry (section 14): blue or
+  dim / bright both bytes in ptm follow the corrected level at sleep entry (section 14): blue or
   charging → the Sleep LED value / `blue_mode`, red → 4 / 4 (steady red, no MCU battery check), blinking
-  → stock (the MCU's genuine low warning). With `anim(2)` / `system` both stay stock.
+  → stock (the MCU's genuine low warning). With off both stay stock.
 
 **Diagnostics (read-only).** Status shows
 
@@ -897,13 +899,13 @@ override is on and the level is **blue**, or while **charging** with `blue(5)` /
 Sleep: wrote 5 / wake read 5 (n=3)
 ```
 
-- `wrote`: the mode the sleep hook wrote at the last sleep entry, or `none` (setting `system`, red /
+- `wrote`: the mode the sleep hook wrote at the last sleep entry, or `none` (setting off, red /
   blinking kept, override off, ...).
 - `wake read`: `0x29` as read by the LED thread's first poll after wake that is no longer "lid closed"
   (from that poll's sample, i.e. before anything is written after wake); `-` while still closed / asleep,
   `?` if the read failed.
 - `n`: sleep entries this boot (first of `0x214` / `0x101` per sleep).
-- Before the first sleep: `Sleep: setting blue(5), no sleep yet`.
+- Before the first sleep: `Sleep: setting dim blue, no sleep yet`.
 
 No extra MCU access: the wake value comes from the normal poll's `0x29` read. Not logged in the session
 CSV (a marker line would need changes to the v1 / v2 parsers; a session with a sleep is invalid for the
@@ -1049,7 +1051,7 @@ session, same times as in 12.8).
    like: fade, off?). Note the `0x29` read-back. Then 0 and leave the screen.
 2. Override on: Status `active`, blue; note the `Boot s:` line after a cold boot (expected 1st LED
    ~1–2 s after Rosalina).
-3. **Lid** close → the Sleep LED setting (13.9, default solid blue) instead of red blinking; open → blue
+3. **Lid** close → the Sleep LED setting (13.9, default dim blue) instead of red blinking; open → blue
    within ~1 s.
 4. **Charger** plugged in → stays blue (Status `charging`); with a red level it may turn blue once the
    MCU-table corrected % is 0.5 above the threshold; never worse. Unplug → normal discharge logic.
@@ -1066,7 +1068,7 @@ intensity 0. So the MCU's sleep animation uses the red LED when the MCU itself t
 (it did, at MCU ~3 %), just like its automatic mode. A second possibility, not excluded yet: ptm writes
 `0x29` itself after our hook during sleep entry.
 
-Change: the mode written at sleep is now the Sleep LED setting, default **5** (12.11). The `Sleep:` line
+Change: the mode written at sleep is now the Sleep LED setting, then default **5**, now **dim (1)** (12.11, 13.11). The `Sleep:` line
 on the Status screen shows what was written and what `0x29` reads on wake, which tells the two
 explanations apart: if we write 5 and wake reads 5 but the LED was red, the MCU ignores the mode during
 sleep; if wake reads something else, someone (ptm / MCU) changed it.
@@ -1077,10 +1079,10 @@ sleep; if wake reads something else, someone (ptm / MCU) changed it.
 
 **Test plan** (override on, corrected level blue; ideally at a low MCU % where the stock LED would be red):
 
-1. Menu: **Sleep LED** until it shows `blue(5)` (the default). Close the lid for about **1 minute**, note
-   the LED colour (solid blue? red? pulsing? off?). Open, then Status: note the `Sleep:` line.
-2. Same with **`blue(1)`**.
-3. Same with **`system`** (nothing written; expected: whatever the MCU does, probably red).
+1. Menu: **Sleep LED** until it shows `dim blue` (the default). Close the lid for about **1 minute**, note
+   the LED colour (dim blue? red? pulsing? off?). Open, then Status: note the `Sleep:` line.
+2. Same with **`bright blue`**.
+3. Same with **`off (stock)`** (nothing written; expected: whatever the MCU does, probably red).
 4. Report for each: setting, LED colour while closed, `Sleep: wrote X / wake read Y (n=N)`.
 
 ### 13.10 Result of the ptm sleep patch test, and refinements (milestone 4d)
@@ -1088,7 +1090,7 @@ sleep; if wake reads something else, someone (ptm / MCU) changed it.
 Third on-device run (override on, the ptm sleep patch of section 14 with only the sleep byte, values
 `02` / `01` / `05`):
 
-- **Blue during sleep works.** At a corrected blue level with Sleep LED `blue(5)` the LED stays blue
+- **Blue during sleep works.** At a corrected blue level with Sleep LED 5 (now `bright blue`) the LED stays blue
   for the whole sleep, no red pulsing. Mode 5 is at **full brightness** while asleep: ptm sets the LED
   brightness (`0x28`) to 50 before the mode, but mode 5 ignores the `0x28` brightness.
 - **Red level shows the wrong sleep sequence.** At a corrected red level the LED blinked red for 1–2 s at
@@ -1102,11 +1104,26 @@ Third on-device run (override on, the ptm sleep patch of section 14 with only th
   byte is patched too (14.1, 14.2): to the mode the thread will want right after wake (5 / 1 at a blue
   level or while charging, 4 at red, stock 0 at blinking).
 - **Charging rule (new).** Charging at sleep entry (adapter or charging flag): blue during sleep at any
-  level (with `blue(5)` / `blue(1)`), for the hook's MCU write and both ptm bytes. Edge case: unplugged
+  level (with dim / bright), for the hook's MCU write and both ptm bytes. Edge case: unplugged
   during sleep, the LED stays blue until the lid opens (nothing of ours runs while asleep).
 - The blinking level keeps the stock bytes (2 / 0): the MCU's own low-battery warning is genuine there.
 
 Test plan: 14.9. Known limitations: 14.10.
+
+### 13.11 Dim blue during sleep works; Sleep LED simplified to three options
+
+Fourth on-device run (ptm sleep and wake patch active, no re-assert while sleep is pending / the lid is
+closed, 14.6):
+
+- **Mode 1 gives a dim blue while asleep.** With Sleep LED 1 the LED fades to ptm's sleep brightness of
+  50 (`0x28`, set right before the mode). An earlier run that found 1 "not dim" happened **before** the
+  re-assert suppression: our LED thread was overwriting ptm's sleep sequence then.
+- Mode 5 stays full-brightness blue (it ignores `0x28`).
+- The former `anim(2)` and `system` options both left ptm's bytes at stock `02` / `00`: duplicates.
+
+Change: the Sleep LED setting now has three options, **dim** (`1`, the new default), **bright** (`5`)
+and **off (stock)** (`0`, legacy `2` / `system` / `anim`), see 12.11. Red / blink behaviour and the wake
+byte (`blue_mode`) are unchanged.
 
 ## 14. ptm sleep and wake LED patch (milestone 4c)
 
@@ -1168,19 +1185,19 @@ the mode the Battery Manager wants at sleep and on wake. Decided from the state 
 
 | Situation at sleep entry | Sleep byte (`0x101a28`) | Wake byte (`0x10199e`) |
 |---|---|---|
-| level **blue** | Sleep LED value: `05` (blue(5)) / `01` (blue(1)) | `blue_mode`: `05` / `01` |
-| **charging** (adapter plugged in or charging flag), any level | Sleep LED value `05` / `01` | `blue_mode` `05` / `01` |
+| level **blue** | Sleep LED value: `01` (dim) / `05` (bright) | `blue_mode`: `05` / `01` |
+| **charging** (adapter plugged in or charging flag), any level | Sleep LED value `01` / `05` | `blue_mode` `05` / `01` |
 | level **red** (solid red) | `04` (red on, blue off, no MCU battery check) | `04` |
 | level **blinking** (corrected ≤ blink threshold) | `02` (stock: the MCU's genuine low warning) | `00` (stock) |
-| Sleep LED `anim(2)` or `system` | `02` (stock) | `00` (stock) |
+| Sleep LED off (stock) | `02` (stock) | `00` (stock) |
 | override off, no curve, control error, shutdown, LED test, no MCU data, nothing written this boot | `02` (stock) | `00` (stock) |
 
 - The decision is `BatteryLedLogic_Decide` with the lid closed on a **copy** of the level state (no side
   effects), then `BatteryPtmPatch_DesiredBytes(cfg, mode, reason)`: reason "lid closed" with Sleep LED
-  blue(5) / blue(1), mode 5 / 1 → sleep = that mode, wake = `blue_mode`; mode 4 → `04` / `04`; everything
+  dim / bright, mode 1 / 5 → sleep = that mode, wake = `blue_mode`; mode 4 → `04` / `04`; everything
   else → `02` / `00`.
 - The sleep hook's own MCU write (12.11) follows the same rule, including charging
-  (`BatteryLedLogic_SleepLevel`: charging + blue(5) / blue(1) → blue). So whenever the sleep byte is not
+  (`BatteryLedLogic_SleepLevel`: charging + dim / bright → blue). So whenever the sleep byte is not
   stock, the hook and ptm send the same mode (checked by the host test over the whole matrix). At the
   blinking level the hook keeps 6 and ptm then sends 2: the MCU's own low-battery warning, wanted there.
 - The wake byte is the mode the LED thread will want right after wake, so `0x29` is already right when
@@ -1332,8 +1349,8 @@ thread's writes; a real sleep halts the thread within a second or two).
 
 `tests/battery/run_host_test.sh` runs both in every mode:
 
-- **Decision matrix** (`ptm_host_test`): 4608 cases = level (blue / red / blink) × charging (none, adapter,
-  charging flag, fully charged) × override × curve × error × shutdown × Sleep LED (5 / 1 / 2 / system) ×
+- **Decision matrix** (`ptm_host_test`): 3456 cases = level (blue / red / blink) × charging (none, adapter,
+  charging flag, fully charged) × override × curve × error × shutdown × Sleep LED (dim 1 / bright 5 / off 0) ×
   `blue_mode` (5 / 1) × last written (5 / none / automatic), through the same path as `battery_led.c`,
   against an independent statement of the table in 14.2; a non-stock sleep byte always equals what the
   sleep hook writes; `DesiredBytes` exhaustively over reasons × modes × settings; both bytes always in
@@ -1348,7 +1365,7 @@ thread's writes; a real sleep halts the thread within a second or two).
   never a re-assert while the lid is closed); full lid close → sleep → wake cycles with a model of the
   thread and the MCU: blue → 5 / 5 with no re-assert; red → 4 / 4 with no re-assert; red with an unpatched
   ptm sending 2 → still no re-assert (the mismatch watch alone would have flagged it); blink → 2 / 0 and one
-  re-assert after wake; charging at red → 5 / 5, then 4 as a normal write; `system` → stock.
+  re-assert after wake; charging at red → 5 / 5, then 4 as a normal write; Sleep LED off → stock.
 
 Last run: `PASS` (with sessions 0001 + 0002 and the dump).
 
@@ -1357,8 +1374,9 @@ Last run: `PASS` (with sessions 0001 + 0002 and the dump).
 Override on. Note the Status line (`ptm patch: …`, `Sleep: …`, `Reasserts: …`) before and after each step.
 Anything with `off:` → note it and stop (the patch refused; nothing was written).
 
-1. **Blue → lid → blue.** Corrected level blue, Sleep LED `blue(5)`. Status `ptm patch: sleep 05 wake 05
-   (active)`. Close the lid ~1 minute: steady blue (full brightness). Open: stays blue.
+1. **Blue → lid → blue.** Corrected level blue, Sleep LED `dim blue` (default). Status `ptm patch: sleep 01
+   wake 05 (active)` (wake = `blue_mode`). Close the lid ~1 minute: dim blue. Open: stays blue. Repeat with
+   `bright blue`: `sleep 05 wake 05`, full-brightness blue while closed.
 2. **Red → lid → steady red, no blink.** Lower the thresholds until the level is red (e.g. red_pct above
    the corrected %), or at a real red level. Status `sleep 04 wake 04`. Close the lid: **steady red** from
    the start, no 1–2 s of red blinking. Open: stays red, re-asserts unchanged.
@@ -1367,11 +1385,11 @@ Anything with `off:` → note it and stop (the patch refused; nothing was writte
    within ~1 s (re-asserts +1).
 4. **Charging at a red level → lid → blue.** Red level (step 2), plug in the charger. Close the lid: LED
    blue while closed. Open: blue, then red within ~1 s if still at a red level (charging rule, 13.3).
-   Status after opening: `sleep 05 wake 05` (the bytes are re-decided at lid close, boot and settings
+   Status after opening: `sleep 01 wake 05` (dim; `05` / `05` with bright) (the bytes are re-decided at lid close, boot and settings
    changes, not when the charger is plugged in while awake).
 5. **Opening the lid at a blue level → no red flash.** Repeat step 1 several times, watching the LED as the
    lid opens: blue throughout, no red flash. `Reasserts` unchanged.
-6. **Sleep LED `system` → stock.** Status `sleep 02 wake 00 (stock)`; lid closed → stock behaviour (red
+6. **Sleep LED `off (stock)` → stock.** Status `sleep 02 wake 00 (stock)`; lid closed → stock behaviour (red
    pulsing if the MCU thinks the battery is low); open → back to blue within ~1 s.
 
 ### 14.10 Known limitations
@@ -1384,5 +1402,5 @@ Anything with `off:` → note it and stop (the patch refused; nothing was writte
   the MCU runs; the bytes are decided at sleep entry and the MCU just keeps the mode. With 5 / 1 / 4 the
   MCU does not do its own battery check, so a level that drops during a long sleep is shown on wake, not
   while asleep. Following it live would need MCU firmware changes, which are ruled out (2.5).
-- Mode 5 ignores the `0x28` brightness that ptm sets before sleep (50), so the sleep LED is at full
-  brightness (13.10). Not changed: it would need another MCU register write.
+- Mode 5 ignores the `0x28` brightness that ptm sets before sleep (50), so `bright blue` is at full
+  brightness (13.10). For a dimmed LED use `dim blue` (mode 1 follows the brightness, 13.11).

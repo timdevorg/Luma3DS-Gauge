@@ -33,7 +33,7 @@ Menu batteryMenu = {
         { "Build curve", METHOD, .method = &BatteryMenu_BuildCurve },
         { "Show graph", METHOD, .method = &BatteryMenu_ShowGraph },
         { "LED override: OFF", METHOD, .method = &BatteryMenu_LedOverride },
-        { "Sleep LED: blue(5)", METHOD, .method = &BatteryMenu_SleepLed },
+        { "Sleep LED: dim blue", METHOD, .method = &BatteryMenu_SleepLed },
         { "Thresholds", METHOD, .method = &BatteryMenu_Thresholds },
         { "LED test", METHOD, .method = &BatteryMenu_LedTest },
         {},
@@ -53,10 +53,9 @@ void BatteryMenu_UpdateSleepLedTitle(u8 sleepMode)
     const char *title;
     switch (sleepMode)
     {
-        case BATTERY_LED_MODE_BLUE_FORCED:  title = "Sleep LED: blue(1)"; break;
-        case BATTERY_LED_MODE_SLEEP:        title = "Sleep LED: anim(2)"; break;
-        case BATTERY_LED_SLEEP_SYSTEM:      title = "Sleep LED: system"; break;
-        default:                            title = "Sleep LED: blue(5)"; break;
+        case BATTERY_LED_MODE_BLUE:         title = "Sleep LED: bright blue"; break;
+        case BATTERY_LED_SLEEP_SYSTEM:      title = "Sleep LED: off (stock)"; break;
+        default:                            title = "Sleep LED: dim blue"; break;
     }
     batteryMenu.items[BATTERY_MENU_SLEEP_LED_ITEM].title = title;
 }
@@ -850,15 +849,14 @@ void BatteryMenu_SleepLed(void)
         u32 y = 30;
         y = batteryMenuLine(y, COLOR_GREEN, "Sleep LED is now: %s", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
         y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed, override on: this mode at a");
-        y = batteryMenuLine(y, COLOR_WHITE, "blue level or while charging. With blue(5)/");
-        y = batteryMenuLine(y, COLOR_WHITE, "blue(1): red level solid red, blinking level");
+        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed, override on: this LED at a");
+        y = batteryMenuLine(y, COLOR_WHITE, "blue level or while charging. With dim/");
+        y = batteryMenuLine(y, COLOR_WHITE, "bright: red level solid red, blinking level");
         y = batteryMenuLine(y, COLOR_WHITE, "the MCU's own low warning.");
         y += SPACING_Y;
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "blue(5): blue on, red off (default)");
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "blue(1): forced default blue");
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_SLEEP ? COLOR_GREEN : COLOR_WHITE, "anim(2): MCU sleep animation (may be red)");
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "system:  write nothing, MCU decides");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "dim:    dimmed blue while asleep (default)");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "bright: full-brightness blue while asleep");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "off:    stock behaviour, nothing written");
         y += SPACING_Y;
         y = batteryMenuLine(y, COLOR_WHITE, "Select this entry again for the next one.");
         y = batteryMenuLine(y, COLOR_WHITE, "Status shows the \"Sleep:\" and \"ptm\" lines.");

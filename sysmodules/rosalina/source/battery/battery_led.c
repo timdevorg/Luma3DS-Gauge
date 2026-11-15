@@ -477,7 +477,7 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         "red_pct=%lu\n"
         "blink_pct=%lu\n"
         "blue_mode=%lu\n"
-        "# sleep_mode: 5 blue on/red off, 1 forced blue, 2 MCU sleep animation, 0 system (write nothing)\n"
+        "# sleep_mode: 1 dim blue (default), 5 bright blue, 0 off (stock ptm, write nothing)\n"
         "sleep_mode=%lu\n",
         (u32)(cfg.override ? 1 : 0), (u32)cfg.redPct, (u32)cfg.blinkPct, (u32)cfg.blueMode, (u32)cfg.sleepMode);
     Result res = BatteryFs_WriteSafely(BATTERY_CONFIG_PATH, BATTERY_CONFIG_TMP_PATH, g_cfgBuf, (u32)n);

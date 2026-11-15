@@ -39,7 +39,7 @@ typedef struct Case
     u8 level;           // LV_*, via the corrected % (default thresholds 10 / 3)
     u8 charge;          // CH_*
     bool override, curve, error, shuttingDown;
-    u8 sleepMode;       // 5, 1, 2, 0 (system)
+    u8 sleepMode;       // 1 dim, 5 bright, 0 off (2: unsanitized legacy, acts as off)
     u8 blueMode;        // 5, 1
     u8 lastWritten;     // 5 (something written) / UNKNOWN / AUTO
 } Case;
@@ -116,7 +116,7 @@ static void expectedBytes(const Case *c, u8 *sleepByte, u8 *wakeByte)
 
 static void testDecisionMatrix(void)
 {
-    static const u8 sleepModes[] = { 5, 1, 2, BATTERY_LED_SLEEP_SYSTEM };
+    static const u8 sleepModes[] = { 1, 5, BATTERY_LED_SLEEP_SYSTEM };  // dim, bright, off
     static const u8 blueModes[] = { 5, 1 };
     static const u8 lastW[] = { BATTERY_LED_MODE_BLUE, BATTERY_LED_MODE_UNKNOWN, BATTERY_LED_MODE_AUTO };
     u32 cases = 0, active = 0;
@@ -146,17 +146,17 @@ static void testDecisionMatrix(void)
             active++;
 
         // No conflicting writes: a non-stock sleep byte is exactly what the sleep hook writes to the MCU (or has
-        // already written: KEEP at the red level means 4 stays). Stock (02) is only sent at blink / anim / system /
+        // already written: KEEP at the red level means 4 stays). Stock (02) is only sent at blink / off /
         // inactive, where the hook writes nothing different from what ptm is allowed to do.
         if (s != 0x02)
             CHECK(hook == s || (hook == BATTERY_LED_MODE_KEEP && s == 0x04));
         // The wake byte is never a mode the awake logic wouldn't use
         CHECK(w == 0x00 || w == c.blueMode || w == 0x04);
     }
-    CHECK(cases == LV_COUNT * CH_COUNT * 2 * 2 * 2 * 2 * 4 * 2 * 3);
+    CHECK(cases == LV_COUNT * CH_COUNT * 2 * 2 * 2 * 2 * 3 * 2 * 3);
     printf("decision matrix: %lu cases, %lu with a non-stock byte\n", (unsigned long)cases, (unsigned long)active);
 
-    // The user's table, spelled out (override on, curve, Sleep LED blue(5), blue_mode 5)
+    // The user's table, spelled out (override on, curve, Sleep LED bright, blue_mode 5)
     Case c = { LV_BLUE, CH_NONE, true, true, false, false, 5, 5, BATTERY_LED_MODE_BLUE };
     u8 s, w, hook;
     ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x05 && w == 0x05 && hook == 0x05);   // blue
@@ -169,11 +169,11 @@ static void testDecisionMatrix(void)
     c.level = LV_BLINK; c.charge = CH_ADAPTER;
     ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x05 && w == 0x05 && hook == 0x05);   // adapter at blink: blue
     c.sleepMode = 1; c.blueMode = 5;
-    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x01 && w == 0x05 && hook == 0x01);   // sleep blue(1), awake 5
+    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x01 && w == 0x05 && hook == 0x01);   // sleep dim(1), awake 5
     c.sleepMode = 2;
-    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x02 && w == 0x00);                   // anim(2): stock
+    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x02 && w == 0x00);                   // unsanitized legacy 2: stock
     c.sleepMode = BATTERY_LED_SLEEP_SYSTEM;
-    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x02 && w == 0x00);                   // system: stock
+    ptmBytes(&c, &s, &w, &hook);  CHECK(s == 0x02 && w == 0x00);                   // off: stock
 }
 
 static void testDesiredBytesExhaustive(void)
