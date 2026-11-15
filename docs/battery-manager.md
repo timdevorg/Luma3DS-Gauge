@@ -11,7 +11,9 @@ red only appear when the battery is actually low.
 > override on); four issues found there (lid, charger, boot, power off) are fixed in
 > [section 13](#13-on-device-results-and-refinements-milestone-4b), **not yet re-tested on hardware**.
 > It is the only code that writes to the MCU (reg `0x29`, mode byte only) and is **off** until you
-> switch it on in the menu.
+> switch it on in the menu. Since [section 14](#14-ptm-sleep-led-patch-milestone-4c) it also changes one
+> verified byte in the running ptm process's RAM so that ptm's own sleep LED command matches the Sleep LED
+> setting (lid closed at a blue level); **not yet tested on hardware**.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -112,6 +114,11 @@ the LED back.
 
 1. The **only** MCU register ever written is `0x29`, mode byte only. Enforce
    this with a whitelist in code.
+   The Battery Manager has exactly **two write paths** (besides its own files under `/luma/battery/`):
+   - MCU reg `0x29`, mode byte, through `BatteryMcu_SetPowerLedMode()` (whitelist 0..6, section 12.2);
+   - **one byte** in the RAM of the running ptm process (New 3DS ptm `0004013020002202`, VA `0x101a28`,
+     values `02` / `01` / `05` only), through `BatteryPtmPatch_Apply()` after full verification
+     (section 14). Never another process, never another address, never NAND / firmware / SD.
 2. Never touch `0x05–0x07` (MCU unlock sequence, "danger zone").
 3. Open `mcu::HWC` briefly for each access and close it again, like Rosalina does
    (reasoning in section 12.4).
@@ -240,7 +247,8 @@ Original plan below; the implementation is described in [section 12](#12-led-con
 4. **LED control** (the planned "LED experiment" and "automatic LED control" in one): override toggle,
    thresholds, LED test screen, automatic control from `BatteryCurve_Corrected()`, re-assert
    detection, sleep / shutdown hand-back. *Done (code complete, builds, host tests pass; awaiting
-   on-device test).* See section 12.
+   on-device test).* See section 12. Refinements after the on-device tests: section 13; ptm sleep LED
+   patch (lid closed at a blue level): section 14.
 5. Optional extras (4.6). Document findings on 3dbrew.
 
 ## 8. Sources
@@ -779,7 +787,7 @@ menu entry needs it.
 - **Status**: corrected % (the LED's input, with the median voltage), override state + reason
   (`active`, `override off`, `no curve`, `charger`, `lid closed`, …, `fast poll`), desired and read-back
   mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last one), the
-  `Sleep:` diagnostics line (12.11), errors.
+  `Sleep:` diagnostics line (12.11), the `ptm sleep patch:` line (14.5), errors.
 
 ### 12.8 Host tests
 
@@ -863,6 +871,8 @@ override is on and the level is **blue**:
   (re-asserted if the MCU shows red); `system` and 2 are not watched.
 - Code: `BatteryLedLogic_SleepModeForLevel(cfg, level)` and `BatteryLedLogic_SleepWrite()` in
   `battery_led_logic.c` (host-tested); `batteryLedSleepLocked()` in `battery_led.c`.
+- ptm sends its own power LED mode (2) later in its sleep routine; with `blue(5)` / `blue(1)` that byte
+  in ptm is patched to the same value (section 14), otherwise it stays stock.
 
 **Diagnostics (read-only).** Status shows
 
@@ -1044,6 +1054,10 @@ on the Status screen shows what was written and what `0x29` reads on wake, which
 explanations apart: if we write 5 and wake reads 5 but the LED was red, the MCU ignores the mode during
 sleep; if wake reads something else, someone (ptm / MCU) changed it.
 
+> **Resolved:** ptm does overwrite it. Reverse engineering of the console's own ptm module shows a
+> sleep LED callback that sends mode 2 after our hook; fixed by a runtime patch of that one byte, see
+> [section 14](#14-ptm-sleep-led-patch-milestone-4c).
+
 **Test plan** (override on, corrected level blue; ideally at a low MCU % where the stock LED would be red):
 
 1. Menu: **Sleep LED** until it shows `blue(5)` (the default). Close the lid for about **1 minute**, note
@@ -1051,3 +1065,176 @@ sleep; if wake reads something else, someone (ptm / MCU) changed it.
 2. Same with **`blue(1)`**.
 3. Same with **`system`** (nothing written; expected: whatever the MCU does, probably red).
 4. Report for each: setting, LED colour while closed, `Sleep: wrote X / wake read Y (n=N)`.
+
+## 14. ptm sleep LED patch (milestone 4c)
+
+### 14.1 Finding
+
+Result of section 13.9 and [ptm-dump-guide.md](ptm-dump-guide.md): with the lid closed at a blue level the
+power LED pulses red because **ptm overwrites our mode**. Reverse engineered from the console's own ptm
+(New 3DS, title `0004013020002202`, process name `ptm`, code at VA `0x00100000`; the GodMode9 "Extract
+.code" dump):
+
+- ptm's sleep routine publishes `0x104` (going to sleep), waits for the acks, then calls a sleep LED
+  callback, and only after that `mcu::RTC` EnterSleep. So the callback runs **after** every notification
+  hook of ours, and its mode wins.
+- The callback, Thumb, at VA `0x101a1c`:
+
+  ```
+  101a1c  4806      ldr   r0, =0x10e290
+  101a1e  2132      movs  r1, #0x32         ; brightness 50
+  101a20  b510      push  {r4, lr}
+  101a22  f000fd9b  bl    0x10255c          ; mcu::RTC 0x30 SetLedBrightness(50)
+  101a26  4804      ldr   r0, =0x10e290
+  101a28  2102      movs  r1, #2            ; power LED mode 2 = MCU sleep animation
+  101a2a  f000fce1  bl    0x1023f0          ; mcu::RTC 0x2E SetPowerLedState(2)
+  ```
+
+- The 16 bytes at VA `0x101a1e` (file offset `0x1a1e` of the raw `.code`) are unique in the module:
+  `32 21 10 B5 00 F0 9B FD 04 48 02 21 00 F0 E1 FC`. Byte 10 (VA `0x101a28`) is the immediate of
+  `movs r1, #2`, i.e. the mode ptm sends.
+- The wake callback sends mode 0 and brightness 255; left alone (our LED thread re-applies the mode after
+  wake anyway).
+- Mode 2 is the MCU's sleep animation, which is red when the MCU itself thinks the battery is low (13.9).
+
+### 14.2 What the patch does
+
+Rosalina changes byte 10 (VA `0x101a28`) in the running ptm process's code in RAM, so that ptm itself
+sends the Sleep LED setting:
+
+| Situation (decided like the sleep hook, lid closed) | Byte |
+|---|---|
+| override on, curve, level **blue**, Sleep LED `blue(5)` | `05` |
+| same with Sleep LED `blue(1)` | `01` |
+| level **red** or **blinking** | `02` (stock: the MCU's genuine low warning during sleep) |
+| Sleep LED `anim(2)` or `system` | `02` |
+| override off, no curve, control error, shutdown, LED test, no MCU data, nothing written this boot | `02` |
+
+The brightness (`32`, i.e. 50) is never touched. The decision is `BatteryLedLogic_Decide` with the lid
+closed on a **copy** of the level state (no side effects), then `BatteryPtmPatch_DesiredByte(mode, reason)`:
+mode 5 / 1 with reason "lid closed" → that byte, everything else → `02`.
+
+**When it is applied** (only written if the byte differs; if it equals the byte last verified / written,
+nothing is mapped at all, so normally only the first call per change costs anything):
+
+- In the notification hook for `0x214` (lid closed), `0x101` (sleep requested) and `0x104` (going to
+  sleep), **after** the sleep hook's MCU write and **before** `main.c` acks / replies. ptm waits for those
+  acks, so it cannot be executing the callback while we patch it. `0x104` is the last one before the
+  callback: normally a no-op check.
+- Once after the LED thread's first successful MCU read at boot (so Status shows the verification result
+  before the first sleep).
+- After every settings change from the menu (override, Sleep LED, thresholds). The menu is closed during
+  sleep, so ptm is not in its sleep routine then; the write is a single byte, so even then ptm would
+  execute either the old or the new instruction.
+- Nothing at shutdown / pre-termination (ptm's shutdown does not use the sleep callback); the byte is gone
+  at the next boot anyway.
+
+### 14.3 Verification (before every write; any failure → nothing written)
+
+1. `OpenProcessByName("ptm")` (Rosalina's `process_patches.c`; it opens the processes one at a time and
+   closes every handle except ptm's). Not found → `off: no ptm`, retried at the next apply.
+2. Title ID via `svcGetProcessInfo(..., 0x10001)` must be `0004013020002202`. Else → `off: title id` for
+   the rest of the boot (e.g. the Old 3DS ptm `0004013000002202`).
+3. `.text` start (`0x10005`) must be `0x00100000` and `.text` size (`0x10002`) must cover `0x101a2e`. Else
+   → `off: layout` for the rest of the boot.
+4. Map the one page `0x101000` and read the 16 bytes at `0x101a1e`: all must equal the pattern, except
+   byte 10, which must be `02`, `01` or `05`. Else → `off: mismatch` for the rest of the boot (other ptm
+   version). The pattern is **not** searched for anywhere else.
+5. The value to write must be `02`, `01` or `05` (`BatteryPtmPatch_ByteAllowed`, also checked on entry).
+6. After the write the 16 bytes are read back and verified again; byte 10 must be the new value, else
+   `write error` (retried at the next apply).
+
+### 14.4 Mechanism
+
+`battery_ptm_patch.c`, reusing what Rosalina itself does for code patches (`input_redirection.c` for
+hid / ir, `plugin/file_loader.c`, `gdb/mem.c`):
+
+1. `OpenProcessByName` → handle; `svcGetProcessInfo` 0x10001 / 0x10005 / 0x10002 (checks above).
+2. `svcMapProcessMemoryEx(CUR_PROCESS_HANDLE, 0x0E800000, ptm, 0x101000, 0x1000, 0)`: maps the one code
+   page read-write into Rosalina. Not at `0x00100000` like the upstream helpers, because the process list /
+   memory viewer, the DSP dump, input redirection and the plugin loader map other processes there,
+   possibly at the same time; `0x0E800000` is outside Rosalina's own fixed regions (`0x07000000` plugin
+   block, `0x08000000` soc, `0x0D000000` / `0x0D800000` buffers, `0x14000000` code). A collision would only
+   make the map fail (`map error`, retried).
+3. Read and verify the 16 bytes, then one `strb` to `0x0E800A28` (= ptm VA `0x101a28`).
+4. Cache maintenance, as Rosalina's GDB stub after writing code: `svcFlushEntireDataCache()` (our write
+   sits in the data cache), then `svcInvalidateEntireInstructionCache()` (drop a stale copy of the
+   instruction). The kernel's `svcUnmapProcessMemoryEx` does both again.
+5. Read back + verify, `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path.
+
+Serialized by its own lock and called with the LED lock held, so the decision and the write can't be
+reordered between the notification, menu and LED threads. Stack: ~0.5 KiB on top of the caller
+(`OpenProcessByName` has a 256-byte PID list). Time: one process scan plus map / unmap (each with a full
+cache flush in the kernel), only when the byte changes; expected on the order of a millisecond (not
+measured).
+
+### 14.5 Status line
+
+```
+ptm sleep patch: 05 (active), writes 1
+ptm sleep patch: 02 (stock), writes 2
+ptm sleep patch: not checked yet, writes 0
+ptm sleep patch: off: no ptm 0xFFFFFFFF
+ptm sleep patch: off: mismatch, writes 0       (also: off: title id, off: layout)
+ptm sleep patch: map error 0x........          (also: write error)
+```
+
+The hex value is the byte currently in ptm (`active` = not stock); `writes` counts successful writes this
+boot. `off: …` / errors are shown in red.
+
+### 14.6 Safety argument
+
+- **One byte, in RAM, of one running process.** The only store is to VA `0x101a28` of the process named
+  `ptm` with title `0004013020002202`, after the checks in 14.3, and only the values `02` / `01` / `05`.
+  `02` is ptm's own value; `01` and `05` are documented reg `0x29` modes that this console's MCU has
+  already shown correctly (LED test, 13.1). The instruction stays `movs r1, #imm8`; no code flow changes.
+- **Gone at reboot.** Nothing is written to NAND, firmware, the SD card (no patch file, no
+  `/luma/sysmodules`, no loader change) or the MCU. ptm's code is loaded fresh from NAND at every boot.
+- **No new MCU register write.** ptm still sends its own `SetLedBrightness` / `SetPowerLedState`; we only
+  change the mode value in its command. `BatteryMcu_SetPowerLedMode()` remains the only MCU write of the
+  Battery Manager.
+- **Refuses on anything unexpected.** Another firmware version, an Old 3DS ptm or a different layout turns
+  the patch off for the boot; it never searches for the pattern elsewhere.
+- Verified on the build: in `rosalina.elf` the only store in `BatteryPtmPatch_Apply` that does not go to
+  its own state or stack buffer is `strb r5, [r3, #40]` with `r3 = 0x0E800A00` (= `0x0E800A28`, the
+  mapped `0x101a28`); `BatteryPtmPatch_Apply` is called only from `batteryLedPtmPatchLocked`.
+
+### 14.7 Code and host tests
+
+| File | Role |
+|---|---|
+| `include/battery/battery_ptm_patch.h` | addresses, pattern constants, API |
+| `source/battery/battery_ptm_patch_logic.c` | pure: `BatteryPtmPatch_DesiredByte`, `_Verify`, `_ByteAllowed`, `_StateName` |
+| `source/battery/battery_ptm_patch.c` | Rosalina: `BatteryPtmPatch_Apply` (open, verify, map, write, cache, unmap, close), status |
+| `source/battery/battery_led.c` | `batteryLedPtmPatchLocked()`: decision on a copy, called from the hook (`0x214` / `0x101` / `0x104`), boot, `BatteryLed_SetConfig` |
+| `source/battery/battery_menu.c` | Status line |
+| `tests/battery/ptm_host_test.c` | host test |
+
+`tests/battery/run_host_test.sh` runs `ptm_host_test` in every mode:
+
+- Decision: `05` / `01` for blue(5) / blue(1) at a blue level; `02` for anim(2), system, red, blinking,
+  override off, no curve, error, shutdown and "nothing written this boot"; `DesiredByte` exhaustively over
+  all reasons × modes.
+- Verification: the pattern with `02` / `01` / `05` accepted, every other byte-10 value and all
+  3 × 15 × 255 single-byte changes elsewhere rejected; the whitelist.
+- With the dump (`PTM_CODE=<path>`, default `sessions/ptm/0004013020002202.dec.code`, gitignored; SKIPPED
+  if missing): the pattern verifies at file offset `0x1a1e` and nowhere else in the file.
+
+### 14.8 On-device test plan
+
+Override on, corrected level **blue**, ideally at a low MCU % where the stock LED would be red.
+
+1. After boot, Status: `ptm sleep patch: 02 (stock)` (with Sleep LED `blue(5)` it may already read
+   `05 (active)`, set at boot). Anything with `off:` → note it and stop here (the patch refused; nothing
+   was written).
+2. Sleep LED **`blue(5)`**: Status shows `05 (active)`. Close the lid ~1 minute: expected **blue** (possibly
+   dimmer than awake: ptm sets brightness 50 before the mode), **no red pulsing**. Open: LED back to the override
+   colour within ~1 s, wake works normally (HOME Menu, sound, Wi-Fi).
+3. Sleep LED **`blue(1)`**: Status `01 (active)`; lid closed → blue.
+4. Sleep LED **`anim(2)`**: Status `02 (stock)`; lid closed → the MCU's pulse (red when the MCU thinks the
+   battery is low, like 13.9).
+5. Sleep LED **`system`**: `02 (stock)`; lid closed → stock behaviour.
+6. Override **off**: `02 (stock)`.
+7. Later, at a red level with `blue(5)`: closing the lid sets `02`; expected the MCU's red low warning.
+8. Report: the Status line after each step (byte, state, `writes`), the `Sleep:` line and the LED colour
+   while closed.

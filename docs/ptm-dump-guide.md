@@ -165,6 +165,10 @@ loader matches patches with the N3DS bit cleared (`sysmodules/loader/source/patc
 `progId &= ~0xF0000000ull`), so a ptm patch keyed on `0004013000002202` also applies to
 `0004013020002202`.
 
+> **Outcome:** the dump showed the call site (sleep LED callback at VA `0x101a1c`, mode byte at
+> `0x101a28`). It is handled by a Rosalina runtime patch of that one byte in RAM instead of a loader
+> patch, see [battery-manager.md section 14](battery-manager.md#14-ptm-sleep-led-patch-milestone-4c).
+
 ## Sources
 
 - GodMode9 source and README, [github.com/d0k3/GodMode9](https://github.com/d0k3/GodMode9)
