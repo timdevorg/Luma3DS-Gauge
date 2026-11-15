@@ -39,6 +39,7 @@
 #include "plugin.h"
 #include "menus/screen_filters.h"
 #include "shell.h"
+#include "battery/battery_led.h"
 
 //#define ROSALINA_MENU_SELF_SCREENSHOT 1 // uncomment this to enable the feature
 
@@ -508,16 +509,29 @@ static void menuDraw(Menu *menu, u32 selected)
 
         // Temperature is padded to 3 chars in both units (F >= 32, so at least 2 digits) so that the string length
         // doesn't change when the unit is toggled or when going above 99F
-        char buf[32];
-        int n = sprintf(
-            buf, fahrenheit ? "  %3d\xF8""F  %lu.%02luV  %lu.%lu%%" : "   %02d\xF8""C  %lu.%02luV  %lu.%lu%%", temperature, // CP437
-            voltageInt, voltageFrac,
-            percentageInt, percentageFrac
-        );
-        Draw_DrawString(SCREEN_BOT_WIDTH - 10 - SPACING_X * n, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, buf);
+        // Battery Manager (docs/battery-manager.md, section 15): with a curve, the corrected % ("c73.4%") after the
+        // MCU %, single spaces; the string is right-aligned in a fixed 26-char field so a shorter one clears the old
+        BatteryLedStatus led;
+        BatteryLed_GetStatus(&led);
+        char buf[48];
+        if (led.haveData && led.corrected >= 0.0f)
+        {
+            u32 c10 = (u32)(led.corrected * 10.0f + 0.5f);
+            sprintf(
+                buf, fahrenheit ? "%d\xF8""F %lu.%02luV %lu.%lu%% c%lu.%lu%%" : "%02d\xF8""C %lu.%02luV %lu.%lu%% c%lu.%lu%%",
+                temperature, voltageInt, voltageFrac, percentageInt, percentageFrac, c10 / 10, c10 % 10
+            );
+        }
+        else
+            sprintf(
+                buf, fahrenheit ? "  %3d\xF8""F  %lu.%02luV  %lu.%lu%%" : "   %02d\xF8""C  %lu.%02luV  %lu.%lu%%", temperature, // CP437
+                voltageInt, voltageFrac,
+                percentageInt, percentageFrac
+            );
+        Draw_DrawFormattedString(SCREEN_BOT_WIDTH - 10 - SPACING_X * 26, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "%26s", buf);
     }
     else
-        Draw_DrawFormattedString(SCREEN_BOT_WIDTH - 10 - SPACING_X * 19, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "%19s", "");
+        Draw_DrawFormattedString(SCREEN_BOT_WIDTH - 10 - SPACING_X * 26, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "%26s", "");
 
     if(isRelease)
         Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Luma3DS %s", versionString);

@@ -19,6 +19,7 @@ void BatteryMenu_BuildCurve(void);
 void BatteryMenu_ShowGraph(void);
 void BatteryMenu_LedOverride(void);
 void BatteryMenu_SleepLed(void);
+void BatteryMenu_Bars(void);
 void BatteryMenu_Thresholds(void);
 void BatteryMenu_LedTest(void);
 
@@ -26,3 +27,5 @@ void BatteryMenu_LedTest(void);
 void BatteryMenu_UpdateLedTitle(bool on);
 /// Sets the "Sleep LED: ..." item title (called when config.ini is loaded / changed).
 void BatteryMenu_UpdateSleepLedTitle(u8 sleepMode);
+/// Sets the "Battery bars: corrected / stock" item title (called when config.ini is loaded / changed).
+void BatteryMenu_UpdateBarsTitle(bool corrected);

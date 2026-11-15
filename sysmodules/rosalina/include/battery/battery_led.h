@@ -55,6 +55,8 @@ typedef struct BatteryLedStatus
     u8 sleepWrote;          //   mode written at the last sleep entry, BATTERY_LED_MODE_UNKNOWN = nothing
     u8 wakeRead;            //   0x29 read on wake before any write, BATTERY_LED_MODE_UNKNOWN = read failed
     bool wakePending;       //   still asleep / lid closed: no wake read yet
+    u8 barsLevel;           // ptm battery bars (section 15): decided level 1..5, 0 = stock
+    u8 barsReason;          //   BatteryBarsReason
 } BatteryLedStatus;
 
 /// Creates the LED thread (call once from the recorder's creation, before the service manager runs).

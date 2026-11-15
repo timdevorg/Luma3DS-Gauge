@@ -27,6 +27,11 @@
 *     checking every 200 ms instead of waiting a fixed time.
 *   - Never writes anything unless the override has been switched on (default off), or the
 *     LED test screen is used. "Automatic" is only written to undo our own earlier write.
+*   - ptm battery bars (section 15, independent of the LED override): after each poll the HOME Menu battery level
+*     is decided from the corrected % (BatteryBars_Decide: the red / blink steps from this LED level state) and put
+*     into ptm's two level copies when it changes (battery_ptm_patch.c, verified); stock while charging, without a
+*     curve, with MCU read errors or with the setting off. Also at boot after the first MCU read and after every
+*     settings change (the thread is kicked and applies it at its next poll).
 *
 *   Design: docs/battery-manager.md, section 12.
 */
@@ -42,6 +47,7 @@
 #include "battery/battery_led.h"
 #include "battery/battery_menu.h"
 #include "battery/battery_ptm_patch.h"
+#include "battery/battery_ptm_bars.h"
 
 #define BATTERY_LED_THREAD_PRIORITY     56      // above the recorder / task runner (58), below the menu (52)
 #define BATTERY_LED_THREAD_STACK_SIZE   0x800   // shallow call tree, no string formatting
@@ -60,6 +66,7 @@
 #define BATTERY_LED_ERROR_RETRY_MS      5000u   // in error state: retry writing "automatic" this often
 #define BATTERY_LED_SHELL_OPEN_POLLS    3       // MCU says "open" this often while 0x213 is missing -> open
 #define BATTERY_LED_SLEEP_OPEN_POLLS    5       // sleep pending but the MCU says "open" this often -> not pending
+#define BATTERY_LED_BARS_RETRY_MS       30000u  // bars patch: retry after no ptm / map error / write error this often
 
 #define NOTIF_SHELL_OPENED              0x213
 #define NOTIF_SHELL_CLOSED              0x214
@@ -101,6 +108,13 @@ static struct
 
     u64 startMs, sdReadyMs, firstDataMs, firstWriteMs; // boot timing (ms since the tick counter started)
 
+    // ptm battery bars (section 15)
+    u8 barsLevel;           // decided level, 0 = stock
+    u8 barsReason;          // BatteryBarsReason
+    bool barsForce;         // apply at the next poll even if the level didn't change (boot, settings change)
+    u64 barsLastApplyMs;
+    u8 readFailStreak;      // MCU reads failed in a row
+
     u8 desired, reason;
     u64 lastAttemptMs;
     u32 reasserts, writes, writeFailures, writeFailStreak;
@@ -116,7 +130,7 @@ static struct
 } g_led;
 
 static LightLock g_cfgFileLock; // config.ini reads / writes (kept out of g_led.lock: SD can be slow)
-static char g_cfgBuf[256];
+static char g_cfgBuf[512];
 
 static u64 batteryLedNowMs(void)
 {
@@ -191,6 +205,41 @@ static void batteryLedPtmPatchLocked(void)
         BatteryPtmPatch_DesiredBytes(&g_led.cfg, mode, reason, &sleepByte, &wakeByte);
     }
     BatteryPtmPatch_Apply(sleepByte, wakeByte);
+}
+
+// ptm battery bars (g_led.lock held, LED thread): decide the HOME Menu level from the corrected % and the LED's
+// level state, apply it if it changed (or g_led.barsForce, or 30 s after a retryable failure). BatteryBars_Apply
+// maps nothing if the bytes are already right. Nothing after a shutdown signal.
+static void batteryLedBarsLocked(u64 nowMs)
+{
+    if (g_led.shuttingDown || preTerminationRequested || !BatteryLedGate_IsOpen(&g_led.gate))
+        return;
+
+    BatteryBarsInputs in;
+    in.haveData = g_led.haveData;
+    in.mcuError = g_led.readFailStreak >= BATTERY_BARS_ERROR_POLLS;
+    in.onCharger = g_led.logic.onCharger;   // debounced by BatteryLedLogic_Decide, the same state the LED uses
+    in.corrected = g_led.corrected;
+    in.ledLevelValid = g_led.logic.levelValid;
+    in.ledLevel = g_led.logic.level;
+
+    u8 prev = g_led.barsLevel;
+    u8 level = BatteryBars_Decide(&g_led.cfg, &in, prev, &g_led.barsReason);
+    g_led.barsLevel = level;
+
+    bool apply = g_led.barsForce || level != prev;
+    if (!apply && nowMs - g_led.barsLastApplyMs >= BATTERY_LED_BARS_RETRY_MS)
+    {
+        BatteryBarsStatus st;
+        BatteryBars_GetStatus(&st);
+        apply = BatteryBars_Retryable(st.state);
+    }
+    if (apply)
+    {
+        g_led.barsForce = false;
+        g_led.barsLastApplyMs = nowMs;
+        BatteryBars_Apply(level);
+    }
 }
 
 // Lid closed / sleep requested (notification thread): apply the sleep mode now, before the system goes on.
@@ -392,8 +441,12 @@ static void batteryLedPoll(void)
         g_led.obs.blue = s.info[0x0B];
         g_led.obs.modeValid = s.ledModeValid;
         g_led.obs.mode = s.ledMode;
+        g_led.readFailStreak = 0;
     }
+    else if (g_led.readFailStreak < 255)
+        g_led.readFailStreak++;
     batteryLedControlLocked(nowMs, fresh);
+    batteryLedBarsLocked(nowMs); // after the LED decision: uses its level / charger state of this poll
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -436,6 +489,7 @@ void BatteryLed_EnsureConfigLoaded(void)
         LightLock_Unlock(&g_led.lock);
         BatteryMenu_UpdateLedTitle(cfg.override);
         BatteryMenu_UpdateSleepLedTitle(cfg.sleepMode);
+        BatteryMenu_UpdateBarsTitle(cfg.bars);
     }
     LightLock_Unlock(&g_cfgFileLock);
 }
@@ -467,6 +521,7 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         g_led.stormCount = 0;
     }
     batteryLedPtmPatchLocked(); // awake (the menu is closed during sleep): ptm isn't in its sleep routine
+    g_led.barsForce = true;     // bars: decided and applied by the thread's next poll (kicked right now)
     LightLock_Unlock(&g_led.lock);
     svcSignalEvent(g_ledKick);
 
@@ -478,8 +533,13 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         "blink_pct=%lu\n"
         "blue_mode=%lu\n"
         "# sleep_mode: 1 dim blue (default), 5 bright blue, 0 off (stock ptm, write nothing)\n"
-        "sleep_mode=%lu\n",
-        (u32)(cfg.override ? 1 : 0), (u32)cfg.redPct, (u32)cfg.blinkPct, (u32)cfg.blueMode, (u32)cfg.sleepMode);
+        "sleep_mode=%lu\n"
+        "# bars: 1 HOME Menu battery bars from the corrected %% (default), 0 stock (section 15)\n"
+        "bars=%lu\n"
+        "bars_4=%lu\n"
+        "bars_3=%lu\n",
+        (u32)(cfg.override ? 1 : 0), (u32)cfg.redPct, (u32)cfg.blinkPct, (u32)cfg.blueMode, (u32)cfg.sleepMode,
+        (u32)(cfg.bars ? 1 : 0), (u32)cfg.bars4Pct, (u32)cfg.bars3Pct);
     Result res = BatteryFs_WriteSafely(BATTERY_CONFIG_PATH, BATTERY_CONFIG_TMP_PATH, g_cfgBuf, (u32)n);
     LightLock_Unlock(&g_cfgFileLock);
     return res;
@@ -518,6 +578,8 @@ void BatteryLed_GetStatus(BatteryLedStatus *out)
     out->sleepWrote = g_led.sleepWrote;
     out->wakeRead = g_led.wakeRead;
     out->wakePending = g_led.wakePending;
+    out->barsLevel = g_led.barsLevel;
+    out->barsReason = g_led.barsReason;
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -654,6 +716,10 @@ static void batteryLedThreadMain(void)
             {
                 ptmChecked = true;
                 batteryLedPtmPatchLocked();
+                // Bars: verify at boot even if the level is stock (Status shows the result); normally the poll
+                // above has already applied the first level, then this maps nothing
+                g_led.barsForce = true;
+                batteryLedBarsLocked(batteryLedNowMs());
             }
             LightLock_Unlock(&g_led.lock);
         }
@@ -684,12 +750,15 @@ MyThread *BatteryLed_CreateThread(void)
     BatteryLedSmoother_Init(&g_led.volt);
     BatteryLedGate_Init(&g_led.gate);
     BatteryPtmPatch_Init();
+    BatteryBars_Init();
     g_led.startMs = batteryLedNowMs();
     g_led.desired = BATTERY_LED_MODE_AUTO;
     g_led.reason = BATTERY_LED_REASON_NO_DATA;
     g_led.corrected = -1.0f;
     g_led.sleepWrote = BATTERY_LED_MODE_UNKNOWN;
     g_led.wakeRead = BATTERY_LED_MODE_UNKNOWN;
+    g_led.barsLevel = BATTERY_BARS_STOCK;
+    g_led.barsReason = BATTERY_BARS_REASON_NO_DATA;
 
     if (R_FAILED(svcCreateEvent(&g_ledKick, RESET_ONESHOT)))
         svcBreak(USERBREAK_PANIC);
