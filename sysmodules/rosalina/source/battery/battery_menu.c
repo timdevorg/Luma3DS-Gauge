@@ -220,6 +220,8 @@ void BatteryMenu_Status(void)
         else if (ptm.state == BATTERY_PTM_STATE_NO_PTM || ptm.state == BATTERY_PTM_STATE_MAP_ERROR)
             y = batteryMenuLine(y, COLOR_RED, "ptm sleep patch: %s 0x%08lx", BatteryPtmPatch_StateName(ptm.state, ptm.current),
                                 (u32)ptm.lastRes);
+        else if (ptm.state == BATTERY_PTM_STATE_OFF_TITLE)
+            y = batteryMenuLine(y, COLOR_RED, "ptm sleep patch: off: title id %08lx%08lx", (u32)(ptm.titleId >> 32), (u32)ptm.titleId);
         else
             y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm sleep patch: %s, writes %lu",
                                 BatteryPtmPatch_StateName(ptm.state, ptm.current), ptm.writes);

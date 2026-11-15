@@ -59,7 +59,9 @@ static void batteryPtmApplyToProcessLocked(Handle h, u8 desired)
 {
     // 1. Title ID: New 3DS ptm only (the O3DS ptm, 0004013000002202, has a different layout)
     s64 tid = 0;
-    if (R_FAILED(svcGetProcessInfo(&tid, h, 0x10001)) || (u64)tid != BATTERY_PTM_TITLE_ID)
+    Result tidRes = svcGetProcessInfo(&tid, h, 0x10001);
+    g_ptm.st.titleId = (u64)tid;
+    if (R_FAILED(tidRes) || ((u64)tid != BATTERY_PTM_TITLE_ID && (u64)tid != BATTERY_PTM_TITLE_ID_BASE))
     {
         g_ptm.st.state = BATTERY_PTM_STATE_OFF_TITLE;
         return;

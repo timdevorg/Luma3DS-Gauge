@@ -29,7 +29,10 @@
 #include <3ds/types.h>
 
 #define BATTERY_PTM_PROCESS_NAME        "ptm"
-#define BATTERY_PTM_TITLE_ID            0x0004013020002202ULL   // New 3DS ptm
+#define BATTERY_PTM_TITLE_ID            0x0004013020002202ULL   // New 3DS ptm (title folder on NAND)
+// The running process's codeset may carry the ID without the N3DS bit (0x20000000): accept both.
+// The 16-byte code check is what really identifies the binary; the O3DS ptm fails it.
+#define BATTERY_PTM_TITLE_ID_BASE       0x0004013000002202ULL
 #define BATTERY_PTM_CODE_BASE           0x00100000u             // ptm's .text start (svcGetProcessInfo 0x10005)
 #define BATTERY_PTM_PATTERN_VA          0x00101A1Eu             // "movs r1,#0x32" in the sleep LED callback
 #define BATTERY_PTM_PATTERN_LEN         16
@@ -62,6 +65,7 @@ typedef struct BatteryPtmPatchStatus
     u32 writes;         // successful writes this boot
     u32 checks;         // verifications this boot (each maps the page once)
     Result lastRes;     // last failing SVC result (NO_PTM / MAP_ERROR)
+    u64 titleId;        // title ID read from the "ptm" process (shown when OFF_TITLE)
 } BatteryPtmPatchStatus;
 
 // ---- Pure (host-tested) ----
