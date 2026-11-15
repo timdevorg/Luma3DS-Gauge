@@ -4,13 +4,15 @@
 *
 *   Host test for the Battery Manager LED logic (sysmodules/rosalina/source/battery/battery_led_logic.c).
 *
-*   1. Unit tests: thresholds, hysteresis, "only gets worse", charger reset, threshold edits,
-*      sleep / shutdown -> automatic, mismatch detection, voltage median, config parsing.
+*   1. Unit tests: thresholds, hysteresis, "only gets worse", charging ("only gets better", unplug,
+*      full), threshold edits, sleep (sleep animation / red kept), wake, shutdown latch ("power off"
+*      once, nothing after), whitelist, mismatch detection, voltage median, config parsing.
 *   2. Replay: feeds recorded sessions (CSV v1 or v2) through the same code path the LED thread
 *      uses (voltage median sampled every 10 s, BatteryCurve_CorrectedFrom, BatteryLedLogic_Decide)
 *      with the override on and default settings, and prints when the LED changes.
 *
-*   Usage: led_host_test curve.bin session.csv [...]
+*   Usage: led_host_test [curve.bin session.csv [...]]
+*   Without arguments only the unit tests run (the replay is skipped).
 *   Run it through tests/battery/run_host_test.sh.
 */
 
@@ -19,6 +21,7 @@
 #include <string.h>
 #include "battery/battery_curve.h"
 #include "battery/battery_led_logic.h"
+#include "battery/battery_mcu.h"
 
 static int g_failures;
 
@@ -29,8 +32,70 @@ static BatteryLedInputs inputs(float corrected)
     BatteryLedInputs in;
     memset(&in, 0, sizeof(in));
     in.override = true;
+    in.pct = 50.0f;
     in.corrected = corrected;
+    in.lastWritten = BATTERY_LED_MODE_BLUE;
     return in;
+}
+
+static u8 decideCharging(BatteryLedLogic *l, const BatteryLedConfig *cfg, float corrected, bool charging, float pct)
+{
+    BatteryLedInputs in = inputs(corrected);
+    in.adapter = true;
+    in.charging = charging;
+    in.pct = pct;
+    return BatteryLedLogic_Decide(l, cfg, &in, NULL);
+}
+
+static u8 decideShell(BatteryLedLogic *l, const BatteryLedConfig *cfg, float corrected, u8 lastWritten, u8 *reason)
+{
+    BatteryLedInputs in = inputs(corrected);
+    in.shellClosed = true;
+    in.lastWritten = lastWritten;
+    return BatteryLedLogic_Decide(l, cfg, &in, reason);
+}
+
+// Minimal model of battery_led.c's write path: the gate is asked before every write, the "MCU" counts writes
+typedef struct FakeLed
+{
+    BatteryLedGate gate;
+    u8 lastWritten;
+    u32 writes, powerOffWrites;
+    u8 reg29;
+} FakeLed;
+
+static void fakeInit(FakeLed *f)
+{
+    memset(f, 0, sizeof(*f));
+    BatteryLedGate_Init(&f->gate);
+    f->lastWritten = BATTERY_LED_MODE_UNKNOWN;
+}
+
+static bool fakeWrite(FakeLed *f, u8 mode)
+{
+    if (!BatteryMcu_LedModeAllowed(mode) || !BatteryLedGate_Allow(&f->gate, mode))
+        return false;
+    f->lastWritten = mode;
+    f->reg29 = mode;
+    f->writes++;
+    if (mode == BATTERY_LED_MODE_POWER_OFF)
+        f->powerOffWrites++;
+    return true;
+}
+
+// The thread / notification hook's write rule for a desired mode
+static void fakeApply(FakeLed *f, u8 desired)
+{
+    if (BatteryLedLogic_NeedsWrite(desired, f->lastWritten))
+        fakeWrite(f, desired);
+}
+
+// batteryLedShutdownLocked: read 0x29 if we own the LED, then the gate decides
+static void fakeShutdown(FakeLed *f)
+{
+    u8 mode = BatteryLedGate_Shutdown(&f->gate, f->lastWritten, true, f->reg29);
+    if (mode != BATTERY_LED_MODE_KEEP)
+        fakeWrite(f, mode);
 }
 
 static u8 decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, float corrected)
@@ -64,20 +129,63 @@ static void unitTests(void)
     CHECK(decide(&l, &cfg, 10.4f) == BATTERY_LED_MODE_RED);
     CHECK(decide(&l, &cfg, 30.0f) == BATTERY_LED_MODE_RED);
 
-    // Charger resets the discharge; automatic while plugged in
-    in = inputs(9.0f);
-    in.adapter = true;
-    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_CHARGER);
-    CHECK(l.level == BATTERY_LED_LEVEL_BLUE);
-    in = inputs(9.0f);
-    in.charging = true;
-    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_AUTO);
-    CHECK(decide(&l, &cfg, 40.0f) == BATTERY_LED_MODE_BLUE); // unplugged after charging
+    // Charging: controlled, MCU-table corrected %, only gets better (with hysteresis), never worse
+    BatteryLedLogic_Init(&l);
     CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
     in = inputs(2.0f);
     in.adapter = true;
-    BatteryLedLogic_Decide(&l, &cfg, &in, NULL);
-    CHECK(decide(&l, &cfg, 2.5f) == BATTERY_LED_MODE_BLINK); // unplugged again right away: still low
+    in.charging = true;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_BLINK && reason == BATTERY_LED_REASON_CHARGER);
+    CHECK(decideCharging(&l, &cfg, 3.4f, true, 3.0f) == BATTERY_LED_MODE_BLINK);  // 3.4 <= 3.5: not yet
+    CHECK(decideCharging(&l, &cfg, 3.6f, true, 3.0f) == BATTERY_LED_MODE_RED);    // > blink + 0.5
+    CHECK(decideCharging(&l, &cfg, 1.0f, true, 3.0f) == BATTERY_LED_MODE_RED);    // never worse while charging
+    CHECK(decideCharging(&l, &cfg, 10.4f, true, 9.0f) == BATTERY_LED_MODE_RED);
+    CHECK(decideCharging(&l, &cfg, 10.6f, true, 9.0f) == BATTERY_LED_MODE_BLUE);  // > red + 0.5
+    CHECK(decideCharging(&l, &cfg, 5.0f, true, 9.0f) == BATTERY_LED_MODE_BLUE);   // stays blue
+    // Adapter without the charging flag (charge paused) at a low %: not "full", the ratchet still applies
+    BatteryLedLogic_Init(&l);
+    CHECK(decide(&l, &cfg, 8.0f) == BATTERY_LED_MODE_RED);
+    CHECK(decideCharging(&l, &cfg, 8.0f, false, 20.0f) == BATTERY_LED_MODE_RED);
+    // Fully charged (adapter in, not charging, MCU >= 95): blue whatever the curve says
+    CHECK(decideCharging(&l, &cfg, 8.0f, false, 96.0f) == BATTERY_LED_MODE_BLUE);
+    CHECK(decideCharging(&l, &cfg, 8.0f, true, 96.0f) == BATTERY_LED_MODE_BLUE);  // and never worse after
+    // Unplugged: the discharge restarts from the corrected % at that moment (either direction)
+    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);    // blue during the charge, red now
+    CHECK(decide(&l, &cfg, 30.0f) == BATTERY_LED_MODE_RED);   // and only worse again
+    BatteryLedLogic_Init(&l);
+    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
+    CHECK(decideCharging(&l, &cfg, 3.2f, true, 2.0f) == BATTERY_LED_MODE_BLINK); // short charge, no improvement
+    CHECK(decide(&l, &cfg, 20.0f) == BATTERY_LED_MODE_BLUE);  // unplugged at corrected 20: restarts from there
+    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);
+    BatteryLedLogic_Init(&l);
+    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
+    CHECK(decideCharging(&l, &cfg, 40.0f, true, 40.0f) == BATTERY_LED_MODE_BLUE);
+    CHECK(decide(&l, &cfg, 40.0f) == BATTERY_LED_MODE_BLUE);  // unplugged after charging
+    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
+    CHECK(decideCharging(&l, &cfg, 2.2f, true, 1.0f) == BATTERY_LED_MODE_BLINK);
+    CHECK(decide(&l, &cfg, 2.5f) == BATTERY_LED_MODE_BLINK);  // unplugged again right away: still low
+    // Boot on the charger: starts from the corrected % as it is
+    BatteryLedLogic_Init(&l);
+    CHECK(decideCharging(&l, &cfg, 5.0f, true, 1.0f) == BATTERY_LED_MODE_RED);
+    BatteryLedLogic_Init(&l);
+    CHECK(decideCharging(&l, &cfg, 50.0f, true, 30.0f) == BATTERY_LED_MODE_BLUE);
+    // Charging + override off / no curve: automatic (nothing to write if nothing was written)
+    in = inputs(50.0f);
+    in.adapter = true;
+    in.override = false;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_OFF);
+    in = inputs(-1.0f);
+    in.adapter = true;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_NO_CURVE);
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_UNKNOWN));
+    // Mismatch watch keeps working while charging (desired blue, MCU shows red)
+    {
+        BatteryLedWatch cw;
+        BatteryLedObserved co = { true, 1, 0, true, 5 };
+        BatteryLedWatch_Init(&cw);
+        BatteryLedWatch_Written(&cw, decideCharging(&l, &cfg, 50.0f, true, 30.0f), 0);
+        CHECK(BatteryLedWatch_Mismatch(&cw, BATTERY_LED_MODE_BLUE, &co, 2000));
+    }
 
     // Threshold edits: may get better only with hysteresis (> threshold + 0.5)
     BatteryLedLogic_Init(&l);
@@ -103,18 +211,126 @@ static void unitTests(void)
     CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLUE_FORCED);
     cfg.blueMode = BATTERY_LED_MODE_BLUE;
 
-    // Sleep (lid closed) -> automatic, level kept; back on wake
+    // Sleep (lid closed / sleep requested): blue -> sleep animation (2), red / blinking red kept, never automatic
     BatteryLedLogic_Init(&l);
+    CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLUE);
+    CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_BLUE, &reason) == BATTERY_LED_MODE_SLEEP && reason == BATTERY_LED_REASON_SHELL);
+    CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_SLEEP, NULL) == BATTERY_LED_MODE_SLEEP);
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_SLEEP, BATTERY_LED_MODE_SLEEP));       // written once
+    CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLUE);                                  // wake: resumes
+    CHECK(BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_BLUE, BATTERY_LED_MODE_SLEEP));
+    cfg.blueMode = BATTERY_LED_MODE_BLUE_FORCED;
+    CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_BLUE_FORCED, NULL) == BATTERY_LED_MODE_SLEEP);
+    cfg.blueMode = BATTERY_LED_MODE_BLUE;
     CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);
-    in = inputs(9.0f);
-    in.shellClosed = true;
-    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_SHELL);
+    CHECK(decideShell(&l, &cfg, 9.0f, BATTERY_LED_MODE_RED, NULL) == BATTERY_LED_MODE_RED);
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_RED, BATTERY_LED_MODE_RED));           // nothing written
     CHECK(decide(&l, &cfg, 10.3f) == BATTERY_LED_MODE_RED);  // voltage recovered during sleep: still red
-
-    // Shutdown, override off, no curve, error -> automatic
+    CHECK(decideShell(&l, &cfg, 2.0f, BATTERY_LED_MODE_RED, NULL) == BATTERY_LED_MODE_BLINK); // got worse while closed
+    CHECK(decideShell(&l, &cfg, 2.0f, BATTERY_LED_MODE_BLINK, NULL) == BATTERY_LED_MODE_BLINK);
+    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
+    // Lid closed while charging: same mapping
+    BatteryLedLogic_Init(&l);
     in = inputs(50.0f);
-    in.shuttingDown = true;
-    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_SHUTDOWN);
+    in.adapter = true;
+    in.charging = true;
+    in.shellClosed = true;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_SLEEP && reason == BATTERY_LED_REASON_SHELL);
+    // Nothing written this boot / last write was automatic: write nothing on sleep
+    BatteryLedLogic_Init(&l);
+    CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_UNKNOWN, NULL) == BATTERY_LED_MODE_KEEP);
+    CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_AUTO, NULL) == BATTERY_LED_MODE_KEEP);
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_KEEP, BATTERY_LED_MODE_BLUE));
+    // Override off while the lid is closed: automatic, only written to undo our own write
+    in = inputs(50.0f);
+    in.shellClosed = true;
+    in.override = false;
+    in.lastWritten = BATTERY_LED_MODE_UNKNOWN;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_OFF);
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_AUTO, in.lastWritten));
+
+    // Sleep / wake sequence through the write path
+    {
+        FakeLed f;
+        fakeInit(&f);
+        BatteryLedLogic_Init(&l);
+        in = inputs(50.0f);
+        in.lastWritten = f.lastWritten;
+        fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));
+        CHECK(f.lastWritten == BATTERY_LED_MODE_BLUE && f.writes == 1);
+        in.lastWritten = f.lastWritten;
+        in.shellClosed = true;                                              // 0x214
+        fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));
+        in.lastWritten = f.lastWritten;
+        fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));        // 0x101 / thread poll: no 2nd write
+        CHECK(f.lastWritten == BATTERY_LED_MODE_SLEEP && f.writes == 2);
+        in.shellClosed = false;                                             // 0x213
+        in.lastWritten = f.lastWritten;
+        fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));
+        CHECK(f.lastWritten == BATTERY_LED_MODE_BLUE && f.writes == 3);
+    }
+
+    // Shutdown latch: "power off" exactly once at the first signal, nothing afterwards
+    {
+        FakeLed f;
+        fakeInit(&f);
+        fakeApply(&f, BATTERY_LED_MODE_BLUE);
+        f.reg29 = BATTERY_LED_MODE_BLUE;
+        fakeShutdown(&f);                                                   // 0x108
+        CHECK(f.powerOffWrites == 1 && f.lastWritten == BATTERY_LED_MODE_POWER_OFF && f.writes == 2);
+        fakeShutdown(&f);                                                   // 0x2000 pre-termination
+        fakeShutdown(&f);                                                   // thread exit
+        in = inputs(50.0f);
+        in.shuttingDown = true;
+        in.lastWritten = f.lastWritten;
+        CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_KEEP && reason == BATTERY_LED_REASON_SHUTDOWN);
+        fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));        // thread poll
+        CHECK(!fakeWrite(&f, BATTERY_LED_MODE_AUTO));                       // menu / hand-back / error retry
+        CHECK(!fakeWrite(&f, BATTERY_LED_MODE_BLUE));                       // LED test screen
+        CHECK(!fakeWrite(&f, BATTERY_LED_MODE_POWER_OFF));
+        CHECK(f.writes == 2 && f.powerOffWrites == 1 && !BatteryLedGate_IsOpen(&f.gate));
+
+        // Pre-termination first (no 0x108), from the sleep animation or red: also exactly once
+        fakeInit(&f);
+        fakeApply(&f, BATTERY_LED_MODE_SLEEP);
+        fakeShutdown(&f);
+        fakeShutdown(&f);
+        CHECK(f.writes == 2 && f.powerOffWrites == 1);
+        fakeInit(&f);
+        fakeApply(&f, BATTERY_LED_MODE_BLINK);
+        fakeShutdown(&f);
+        CHECK(f.writes == 2 && f.powerOffWrites == 1);
+
+        // The system has already set "power off" (0x29 reads 3): nothing written, and nothing later
+        fakeInit(&f);
+        fakeApply(&f, BATTERY_LED_MODE_BLUE);
+        f.reg29 = BATTERY_LED_MODE_POWER_OFF;
+        fakeShutdown(&f);
+        fakeShutdown(&f);
+        CHECK(f.writes == 1 && f.powerOffWrites == 0 && !fakeWrite(&f, BATTERY_LED_MODE_AUTO));
+
+        // Nothing written this boot (override off): nothing on shutdown, nothing after
+        fakeInit(&f);
+        fakeShutdown(&f);
+        fakeShutdown(&f);
+        CHECK(f.writes == 0 && !fakeWrite(&f, BATTERY_LED_MODE_AUTO) && f.writes == 0);
+        // Last write was automatic (override switched off earlier): we don't own the LED, nothing written
+        fakeInit(&f);
+        fakeApply(&f, BATTERY_LED_MODE_BLUE);
+        fakeApply(&f, BATTERY_LED_MODE_AUTO);
+        fakeShutdown(&f);
+        CHECK(f.writes == 2 && f.powerOffWrites == 0);
+        // Read of 0x29 failed: write "power off" anyway (once)
+        BatteryLedGate g;
+        BatteryLedGate_Init(&g);
+        CHECK(BatteryLedGate_Shutdown(&g, BATTERY_LED_MODE_RED, false, BATTERY_LED_MODE_POWER_OFF) == BATTERY_LED_MODE_POWER_OFF);
+        CHECK(!BatteryLedGate_Allow(&g, BATTERY_LED_MODE_AUTO));   // only "power off" may use the last write
+        CHECK(BatteryLedGate_Allow(&g, BATTERY_LED_MODE_POWER_OFF));
+        CHECK(!BatteryLedGate_Allow(&g, BATTERY_LED_MODE_POWER_OFF));
+        CHECK(BatteryLedGate_Shutdown(&g, BATTERY_LED_MODE_RED, false, 0) == BATTERY_LED_MODE_KEEP);
+    }
+
+    // Override off, no curve, error -> automatic; never written if nothing was written this boot
     in = inputs(50.0f);
     in.override = false;
     CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_OFF);
@@ -123,6 +339,16 @@ static void unitTests(void)
     in = inputs(50.0f);
     in.error = true;
     CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_AUTO && reason == BATTERY_LED_REASON_ERROR);
+    CHECK(BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_BLUE));
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_AUTO));
+    CHECK(!BatteryLedLogic_NeedsWrite(BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_UNKNOWN));
+
+    // Whitelist: reg 0x29 modes 0..6 only
+    for (u32 m = 0; m <= 6; m++)
+        CHECK(BatteryMcu_LedModeAllowed(m));
+    static const u32 refused[] = { 7, 8, 0x10, 0x7F, 0x80, BATTERY_LED_MODE_KEEP, BATTERY_LED_MODE_UNKNOWN, 0x100, 0x106, 0xFFFFFFFFu };
+    for (u32 i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
+        CHECK(!BatteryMcu_LedModeAllowed(refused[i]));
 
     // Mismatch detection
     BatteryLedWatch w;
@@ -138,6 +364,11 @@ static void unitTests(void)
     o.blue = 200;
     CHECK(!BatteryLedWatch_Mismatch(&w, BATTERY_LED_MODE_BLUE, &o, 11000));
     CHECK(!BatteryLedWatch_Mismatch(&w, BATTERY_LED_MODE_AUTO, &o, 11000));
+    BatteryLedWatch_Written(&w, BATTERY_LED_MODE_SLEEP, 12000);   // sleep animation / power off: not watched
+    o.red = 1; o.blue = 0;
+    CHECK(!BatteryLedWatch_Mismatch(&w, BATTERY_LED_MODE_SLEEP, &o, 20000));
+    BatteryLedWatch_Written(&w, BATTERY_LED_MODE_POWER_OFF, 12000);
+    CHECK(!BatteryLedWatch_Mismatch(&w, BATTERY_LED_MODE_POWER_OFF, &o, 20000));
 
     BatteryLedWatch_Written(&w, BATTERY_LED_MODE_RED, 20000);
     o.red = 1; o.blue = 0;
@@ -285,16 +516,22 @@ static void replay(const char *path)
            number, path, n, tEnd / 3600000.0, cfg.redPct, cfg.blinkPct, cfg.blueMode);
     printf("  %-7s %-8s %7s %4s %8s %9s  %s\n", "elapsed", "left", "MCU %", "volt", "median", "corrected", "LED");
 
+    bool prevCharger = false;
     for (u32 i = 0; i < n; i++)
     {
         const Row *r = &g_rows[i];
+        // Same as batteryLedPoll(): median reset on unplug, MCU table only on the adapter
+        bool charger = (r->flags & 0x18) != 0;
+        if (prevCharger && !charger)
+            BatteryLedSmoother_Init(&sm);
+        prevCharger = charger;
         if (sm.count == 0 || r->t >= nextVolt)
         {
             BatteryLedSmoother_Push(&sm, r->volt);
             nextVolt = (u64)r->t + BATTERY_LED_VOLT_SAMPLE_MS;
         }
         float med = BatteryLedSmoother_Median(&sm);
-        float c = BatteryCurve_CorrectedFrom(&g_curve, r->pct, med);
+        float c = BatteryCurve_CorrectedFrom(&g_curve, r->pct, charger ? 0.0f : med);
         if (c < minCorr)
             minCorr = c;
 
@@ -302,6 +539,8 @@ static void replay(const char *path)
         in.adapter = (r->flags & 0x08) != 0;
         in.charging = (r->flags & 0x10) != 0;
         in.shellClosed = (r->flags & 0x02) == 0;
+        in.pct = r->pct;
+        in.lastWritten = prevMode == 0xFF ? BATTERY_LED_MODE_UNKNOWN : prevMode;
         u8 mode = BatteryLedLogic_Decide(&l, &cfg, &in, NULL);
 
         // Same thresholds without the "only gets worse" rule, to count the flapping it prevents
@@ -331,13 +570,14 @@ static void replay(const char *path)
 
 int main(int argc, char **argv)
 {
+    unitTests();
+
     if (argc < 2)
     {
-        fprintf(stderr, "usage: %s curve.bin [session.csv ...]\n", argv[0]);
-        return 2;
+        printf("replay: SKIPPED (no curve.bin / session CSVs given; usage: %s curve.bin session.csv [...])\n", argv[0]);
+        printf("\n%s\n", g_failures == 0 ? "led host test: OK (unit tests only)" : "led host test: FAILED");
+        return g_failures == 0 ? 0 : 1;
     }
-
-    unitTests();
 
     FILE *f = fopen(argv[1], "rb");
     if (f == NULL || fread(&g_curve, sizeof(g_curve), 1, f) != 1 || !BatteryCurve_FileIsValid(&g_curve))

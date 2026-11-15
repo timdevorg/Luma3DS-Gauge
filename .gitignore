@@ -27,3 +27,6 @@ hbmenu.zip
 scripts/.3ds-ip
 scripts/backups/
 .idea/
+
+# Session CSVs for the host tests (local only)
+sessions/

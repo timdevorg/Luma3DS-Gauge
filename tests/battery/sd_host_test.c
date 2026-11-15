@@ -11,10 +11,12 @@
 *   - BatteryCurve_Build, given the sessions newest first (like the Build curve menu), writes a
 *     curve.bin byte-identical to `build_curve.py --bin` (sessions sorted ascending)
 *   - the v2 copies build the same curve.bin
-*   - BatteryFs_WriteSafely leaves only the target file
+*   - BatteryFs_WriteSafely leaves only the target file, BatteryFs_SdReady
 *
 *   Usage: sd_host_test sd_root_v1 sd_root_v2 expected_curve.bin number [...]
-*   (each root holds luma/battery/sessions/NNNN.csv). Run it through tests/battery/run_host_test.sh.
+*   (each root holds luma/battery/sessions/NNNN.csv), or
+*          sd_host_test sd_root    (no session CSVs: only the safe-write / SD-ready checks)
+*   Run it through tests/battery/run_host_test.sh.
 */
 
 #include <dirent.h>
@@ -244,8 +246,37 @@ static bool readFile(const char *path, void *buf, size_t size, size_t *outLen)
     return true;
 }
 
+// Safe write: twice (second time the target exists), only the target is left
+static void safeWriteTest(void)
+{
+    char cfg[1024], cfgTmp[1024];
+    static u8 got[64];
+    size_t gotLen = 0;
+    snprintf(cfg, sizeof(cfg), "%s/luma/battery/test.ini", g_root);
+    snprintf(cfgTmp, sizeof(cfgTmp), "%s/luma/battery/test.tmp", g_root);
+    CHECK(BatteryFs_SdReady());
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafely("/luma/battery/test.ini", "/luma/battery/test.tmp", "a=1\n", 4)));
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafely("/luma/battery/test.ini", "/luma/battery/test.tmp", "b=22\n", 5)));
+    CHECK(readFile(cfg, got, sizeof(got), &gotLen) && gotLen == 5 && memcmp(got, "b=22\n", 5) == 0);
+    CHECK(access(cfgTmp, F_OK) != 0);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2)
+    {
+        // No session CSVs: only what doesn't need them
+        g_root = argv[1];
+        char luma[1024];
+        snprintf(luma, sizeof(luma), "%s/luma", argv[1]);
+        mkdir(argv[1], 0755);
+        mkdir(luma, 0755); // like a real SD card; EnsureDirs creates luma/battery[/sessions]
+        CHECK(R_SUCCEEDED(BatteryFs_EnsureDirs()));
+        safeWriteTest();
+        printf("sessions / curve build: SKIPPED (no session CSVs)\n");
+        printf("%s\n", g_failures == 0 ? "sd host test: OK (safe write only)" : "sd host test: FAILED");
+        return g_failures == 0 ? 0 : 1;
+    }
     if (argc < 5)
     {
         fprintf(stderr, "usage: %s sd_root_v1 sd_root_v2 expected_curve.bin number [...]\n", argv[0]);
@@ -303,14 +334,7 @@ int main(int argc, char **argv)
         CHECK(same);
         CHECK(access(tmp, F_OK) != 0);
 
-        // Safe write: twice (second time the target exists), only the target is left
-        char cfg[1024], cfgTmp[1024];
-        snprintf(cfg, sizeof(cfg), "%s/luma/battery/test.ini", g_root);
-        snprintf(cfgTmp, sizeof(cfgTmp), "%s/luma/battery/test.tmp", g_root);
-        CHECK(R_SUCCEEDED(BatteryFs_WriteSafely("/luma/battery/test.ini", "/luma/battery/test.tmp", "a=1\n", 4)));
-        CHECK(R_SUCCEEDED(BatteryFs_WriteSafely("/luma/battery/test.ini", "/luma/battery/test.tmp", "b=22\n", 5)));
-        CHECK(readFile(cfg, got, sizeof(got), &gotLen) && gotLen == 5 && memcmp(got, "b=22\n", 5) == 0);
-        CHECK(access(cfgTmp, F_OK) != 0);
+        safeWriteTest();
     }
 
     bool sameInfo = true;

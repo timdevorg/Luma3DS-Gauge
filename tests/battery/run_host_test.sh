@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Host test for the Battery Manager curve code.
+# Host test for the Battery Manager curve, SD and LED code.
 #
-# Usage: tests/battery/run_host_test.sh session.csv [more.csv ...]
+# Usage: tests/battery/run_host_test.sh [session.csv ...]
+#
+# Without arguments it uses sessions/0001.csv and sessions/0002.csv (repo root, gitignored) if both
+# exist. Otherwise only the unit tests run (LED logic, safe write) and the parts that need
+# recorded sessions (curve comparison, session parsing, LED replay) are SKIPPED, with a message.
+# Get the CSVs from the console's /luma/battery/sessions/ into sessions/ first for the full run.
 #
 # Compiles sysmodules/rosalina/source/battery/battery_curve.c natively (clang or cc),
 # builds a curve from the given CSVs with it and with scripts/build_curve.py, and checks:
@@ -16,7 +21,7 @@
 #   - LED logic unit tests + replay of the sessions with that curve (led_host_test.c)
 #
 # GRAPH_OUT=<dir>: also renders the on-console graph (battery_graph.c) into
-# <dir>/graph_full.ppm, graph_zoom.ppm and graph_nocurve_full.ppm / _zoom.ppm.
+# <dir>/graph_full.ppm, graph_zoom.ppm and graph_nocurve_full.ppm / _zoom.ppm (needs sessions).
 #
 # AI disclosure: written with the help of AI (Claude Code), reviewed by the maintainer.
 
@@ -28,7 +33,11 @@ OUT="${TMPDIR:-/tmp}/battery-host-test.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-[ $# -ge 1 ] || { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+case "${1:-}" in -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+if [ $# -eq 0 ] && [ -f "$REPO/sessions/0001.csv" ] && [ -f "$REPO/sessions/0002.csv" ]; then
+    set -- "$REPO/sessions/0001.csv" "$REPO/sessions/0002.csv"
+    echo "using $REPO/sessions/0001.csv and 0002.csv"
+fi
 
 CC="${CC:-$(command -v clang || command -v cc)}"
 "$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror \
@@ -46,6 +55,19 @@ CC="${CC:-$(command -v clang || command -v cc)}"
     "$REPO/sysmodules/rosalina/source/battery/battery_curve_sd.c" \
     "$REPO/sysmodules/rosalina/source/battery/battery_sessions.c" "$HERE/sd_host_test.c" \
     -o "$OUT/sd_host_test"
+
+if [ $# -eq 0 ]; then
+    echo "No session CSVs (sessions/0001.csv + 0002.csv not found, none given):"
+    echo "curve comparison, session parsing and LED replay are SKIPPED; running the unit tests only."
+    echo
+    status=0
+    "$OUT/led_host_test" || status=1
+    echo
+    "$OUT/sd_host_test" "$OUT/sd_unit" || status=1
+    echo
+    [ $status -eq 0 ] && echo "PASS (unit tests only, replay skipped)" || echo "FAIL"
+    exit $status
+fi
 
 "$OUT/curve_host_test" "$OUT/c.bin" "$@" | tee "$OUT/c.txt"
 python3 "$REPO/scripts/build_curve.py" --quiet --include-high-end --include-incomplete \
