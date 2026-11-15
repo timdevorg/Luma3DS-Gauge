@@ -166,8 +166,8 @@ loader matches patches with the N3DS bit cleared (`sysmodules/loader/source/patc
 `0004013020002202`.
 
 > **Outcome:** the dump showed the call site (sleep LED callback at VA `0x101a1c`, mode byte at
-> `0x101a28`). It is handled by a Rosalina runtime patch of that one byte in RAM instead of a loader
-> patch, see [battery-manager.md section 14](battery-manager.md#14-ptm-sleep-led-patch-milestone-4c).
+> `0x101a28`) and the wake LED callback (VA `0x101990`, mode byte at `0x10199e`). Both are handled by a
+> Rosalina runtime patch of those bytes in RAM instead of a loader patch, see [battery-manager.md section 14](battery-manager.md#14-ptm-sleep-and-wake-led-patch-milestone-4c).
 
 ## Sources
 
