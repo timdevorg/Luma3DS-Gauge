@@ -6,7 +6,8 @@
 *
 *   1. Unit tests: thresholds, hysteresis, "only gets worse", charging ("only gets better", unplug,
 *      full), threshold edits, sleep (sleep animation / red kept), wake, shutdown latch ("power off"
-*      once, nothing after), whitelist, mismatch detection, voltage median, config parsing.
+*      once, nothing after), whitelist, mismatch detection, voltage median, config parsing, sleep transition
+*      (no re-assert between sleep entry and wake, ptm sleep / wake bytes, charging at sleep entry).
 *   2. Replay: feeds recorded sessions (CSV v1 or v2) through the same code path the LED thread
 *      uses (voltage median sampled every 10 s, BatteryCurve_CorrectedFrom, BatteryLedLogic_Decide)
 *      with the override on and default settings, and prints when the LED changes.
@@ -22,6 +23,7 @@
 #include "battery/battery_curve.h"
 #include "battery/battery_led_logic.h"
 #include "battery/battery_mcu.h"
+#include "battery/battery_ptm_patch.h"
 
 static int g_failures;
 
@@ -266,6 +268,227 @@ static void sleepSettingTests(void)
     }
 }
 
+// ---- Sleep transition (section 14): no re-assert over ptm's sleep / wake byte ----
+
+// What the MCU shows for a reg 0x29 mode while the MCU itself thinks the battery is low (the case seen on the
+// console): automatic and the sleep animation pick the red LED
+static BatteryLedObserved observedFor(u8 reg29, u32 phase)
+{
+    BatteryLedObserved o;
+    o.infoValid = true;
+    o.modeValid = true;
+    o.mode = reg29;
+    switch (reg29)
+    {
+        case BATTERY_LED_MODE_BLUE:
+        case BATTERY_LED_MODE_BLUE_FORCED:  o.red = 0; o.blue = 255; break;
+        case BATTERY_LED_MODE_RED:
+        case BATTERY_LED_MODE_AUTO:         o.red = 1; o.blue = 0; break;
+        default:                            o.red = (u8)(phase & 1); o.blue = 0; break; // 2 / 6: red toggles
+    }
+    return o;
+}
+
+typedef struct FakeThread
+{
+    BatteryLedLogic logic;
+    BatteryLedWatch watch;
+    u8 reg29;
+    u32 writes, reasserts, phase;
+    u64 now;
+} FakeThread;
+
+static void ftWrite(FakeThread *t, u8 mode)
+{
+    CHECK(BatteryMcu_LedModeAllowed(mode));
+    t->reg29 = mode;
+    t->writes++;
+    BatteryLedWatch_Written(&t->watch, mode, t->now);
+}
+
+// One poll of batteryLedControlLocked (fresh data, rate limit passed)
+static void ftPoll(FakeThread *t, const BatteryLedConfig *cfg, float corrected, bool charging, bool shellClosed, bool sleepPending)
+{
+    t->now += 1000;
+    t->phase++;
+    BatteryLedInputs in = inputs(corrected);
+    in.adapter = charging;
+    in.charging = charging;
+    in.shellClosed = shellClosed || sleepPending;
+    in.lastWritten = t->watch.lastWritten;
+    u8 reason;
+    u8 desired = BatteryLedLogic_Decide(&t->logic, cfg, &in, &reason);
+    if (desired == BATTERY_LED_MODE_KEEP)
+        return;
+    if (desired == BATTERY_LED_MODE_AUTO)
+    {
+        if (BatteryLedLogic_NeedsWrite(desired, t->watch.lastWritten))
+            ftWrite(t, desired);
+        return;
+    }
+    u8 act = BatteryLedLogic_ThreadAction(desired, t->watch.lastWritten, reason, sleepPending);
+    BatteryLedObserved o = observedFor(t->reg29, t->phase);
+    if (act == BATTERY_LED_ACTION_WRITE)
+        ftWrite(t, desired);
+    else if (act == BATTERY_LED_ACTION_CHECK && BatteryLedWatch_Mismatch(&t->watch, desired, &o, t->now))
+    {
+        t->reasserts++;
+        ftWrite(t, desired);
+    }
+}
+
+// The sleep hook at 0x214 (entering) / 0x101, then ptm's bytes as battery_led.c computes them
+static void ftSleep(FakeThread *t, const BatteryLedConfig *cfg, float corrected, bool charging, bool entering, u8 *sleepByte, u8 *wakeByte)
+{
+    BatteryLedInputs in = inputs(corrected);
+    in.adapter = charging;
+    in.charging = charging;
+    in.shellClosed = true;
+    in.lastWritten = t->watch.lastWritten;
+    u8 reason;
+    u8 desired = BatteryLedLogic_Decide(&t->logic, cfg, &in, &reason);
+    u8 m = BatteryLedLogic_SleepWrite(desired, reason, BatteryLedLogic_SleepLevel(cfg, t->logic.level, charging),
+                                      t->watch.lastWritten, entering);
+    if (m != BATTERY_LED_MODE_KEEP)
+        ftWrite(t, m);
+
+    BatteryLedLogic copy = t->logic;
+    u8 r2;
+    u8 d2 = BatteryLedLogic_Decide(&copy, cfg, &in, &r2);
+    BatteryPtmPatch_DesiredBytes(cfg, d2, r2, sleepByte, wakeByte);
+}
+
+// One full lid close -> sleep -> lid open cycle at a fixed level. Returns the LED thread's re-asserts during it.
+// ptmSleepOverride: what ptm actually sends at sleep (0xFF = the patched sleep byte; 2 = an unpatched ptm).
+static u32 sleepCycle(FakeThread *t, const BatteryLedConfig *cfg, float corrected, bool charging, u8 ptmSleepOverride,
+                      u8 *sleepSeen, u8 *wakeSeen)
+{
+    u32 before = t->reasserts;
+    u8 sb, wb;
+    ftSleep(t, cfg, corrected, charging, true, &sb, &wb);              // 0x214
+    ftPoll(t, cfg, corrected, charging, true, false);                  // thread, lid closed
+    ftSleep(t, cfg, corrected, charging, false, &sb, &wb);             // 0x101
+    for (u32 i = 0; i < 3; i++)
+        ftPoll(t, cfg, corrected, charging, true, true);               // thread, sleep pending
+    t->reg29 = ptmSleepOverride == 0xFF ? sb : ptmSleepOverride;       // ptm's sleep LED callback
+    *sleepSeen = t->reg29;
+    for (u32 i = 0; i < 3; i++)
+        ftPoll(t, cfg, corrected, charging, true, true);               // still before EnterSleep
+    t->now += 3600000;                                                 // asleep (ARM11 off)
+    t->reg29 = wb;                                                     // ptm's wake LED callback
+    *wakeSeen = t->reg29;
+    ftPoll(t, cfg, corrected, charging, true, false);                  // awake, 0x106 seen, lid still closed
+    for (u32 i = 0; i < 3; i++)
+        ftPoll(t, cfg, corrected, charging, false, false);             // lid open
+    return t->reasserts - before;
+}
+
+static void ftInit(FakeThread *t, const BatteryLedConfig *cfg, float corrected, bool charging)
+{
+    memset(t, 0, sizeof(*t));
+    BatteryLedLogic_Init(&t->logic);
+    BatteryLedWatch_Init(&t->watch);
+    t->now = 100000;
+    for (u32 i = 0; i < 4; i++)
+        ftPoll(t, cfg, corrected, charging, false, false);   // awake: first write + read-back becomes trusted
+    CHECK(t->watch.readback == BATTERY_LED_READBACK_TRUSTED);
+}
+
+static void sleepTransitionTests(void)
+{
+    BatteryLedConfig cfg;
+    BatteryLedConfig_Defaults(&cfg);
+    cfg.override = true;
+    FakeThread t;
+    u8 sl, wk;
+
+    // ThreadAction table
+    CHECK(BatteryLedLogic_ThreadAction(5, 5, BATTERY_LED_REASON_ACTIVE, false) == BATTERY_LED_ACTION_CHECK);
+    CHECK(BatteryLedLogic_ThreadAction(4, 5, BATTERY_LED_REASON_ACTIVE, false) == BATTERY_LED_ACTION_WRITE);
+    CHECK(BatteryLedLogic_ThreadAction(4, 4, BATTERY_LED_REASON_CHARGER, false) == BATTERY_LED_ACTION_CHECK);
+    CHECK(BatteryLedLogic_ThreadAction(4, 4, BATTERY_LED_REASON_SHELL, false) == BATTERY_LED_ACTION_NONE);
+    CHECK(BatteryLedLogic_ThreadAction(6, 4, BATTERY_LED_REASON_SHELL, false) == BATTERY_LED_ACTION_WRITE);
+    for (u32 d = 0; d < 256; d++)
+        for (u32 lw = 0; lw < 256; lw += 17)
+            for (u32 r = 0; r <= BATTERY_LED_REASON_TEST; r++)
+            {
+                u8 a = BatteryLedLogic_ThreadAction((u8)d, (u8)lw, (u8)r, true);
+                CHECK(a == BATTERY_LED_ACTION_NONE); // sleep pending: never a write
+                a = BatteryLedLogic_ThreadAction((u8)d, (u8)lw, (u8)r, false);
+                if (r == BATTERY_LED_REASON_SHELL)
+                    CHECK(a != BATTERY_LED_ACTION_CHECK); // lid closed: never a re-assert
+                if (d == BATTERY_LED_MODE_KEEP || d == BATTERY_LED_MODE_AUTO)
+                    CHECK(a == BATTERY_LED_ACTION_NONE);
+            }
+
+    // Charging at sleep entry: blue sleep level with blue(5) / blue(1); level as it is with anim(2) / system
+    cfg.sleepMode = 5;
+    CHECK(BatteryLedLogic_SleepLevel(&cfg, BATTERY_LED_LEVEL_RED, true) == BATTERY_LED_LEVEL_BLUE);
+    CHECK(BatteryLedLogic_SleepLevel(&cfg, BATTERY_LED_LEVEL_BLINK, true) == BATTERY_LED_LEVEL_BLUE);
+    CHECK(BatteryLedLogic_SleepLevel(&cfg, BATTERY_LED_LEVEL_RED, false) == BATTERY_LED_LEVEL_RED);
+    cfg.sleepMode = 2;
+    CHECK(BatteryLedLogic_SleepLevel(&cfg, BATTERY_LED_LEVEL_RED, true) == BATTERY_LED_LEVEL_RED);
+    cfg.sleepMode = BATTERY_LED_SLEEP_SYSTEM;
+    CHECK(BatteryLedLogic_SleepLevel(&cfg, BATTERY_LED_LEVEL_RED, true) == BATTERY_LED_LEVEL_RED);
+    cfg.sleepMode = 5;
+
+    // 1. Blue -> lid -> blue: ptm sends 5 at sleep and 5 on wake, no re-assert, no extra write
+    ftInit(&t, &cfg, 50.0f, false);
+    u32 w0 = t.writes;
+    CHECK(sleepCycle(&t, &cfg, 50.0f, false, 0xFF, &sl, &wk) == 0);
+    CHECK(sl == 5 && wk == 5 && t.reg29 == 5 && t.writes == w0 + 1); // the one forced sleep-entry write of 5
+
+    // 2. Red -> lid -> steady red: ptm sends 4 / 4; the thread never re-asserts
+    ftInit(&t, &cfg, 8.0f, false);
+    CHECK(t.reg29 == BATTERY_LED_MODE_RED);
+    w0 = t.writes;
+    CHECK(sleepCycle(&t, &cfg, 8.0f, false, 0xFF, &sl, &wk) == 0);
+    CHECK(sl == 4 && wk == 4 && t.reg29 == 4 && t.writes == w0);
+    //    The fight seen on the console (ptm sending 2 at a red level): the mismatch watch would flag it awake,
+    //    but the guard keeps the thread quiet during the transition
+    ftInit(&t, &cfg, 8.0f, false);
+    {
+        BatteryLedObserved o = observedFor(2, 1);
+        BatteryLedWatch wc = t.watch;
+        CHECK(BatteryLedWatch_Mismatch(&wc, BATTERY_LED_MODE_RED, &o, t.now + 10000)); // would re-assert
+    }
+    w0 = t.writes;
+    u32 ra = sleepCycle(&t, &cfg, 8.0f, false, 2, &sl, &wk);
+    CHECK(ra == 0 && t.writes == w0);
+
+    // 3. Blink level -> stock: ptm sends 2 at sleep (MCU's own low warning), 0 on wake; the thread restores 6
+    //    once after wake (one re-assert per wake, after the lid is open)
+    ftInit(&t, &cfg, 2.0f, false);
+    CHECK(t.reg29 == BATTERY_LED_MODE_BLINK);
+    ra = sleepCycle(&t, &cfg, 2.0f, false, 0xFF, &sl, &wk);
+    CHECK(sl == 2 && wk == 0 && t.reg29 == 6 && ra == 1);
+
+    // 4. Charging at a red level -> lid -> blue: the hook writes 5, ptm sends 5 / 5; on wake, still charging at red,
+    //    the thread writes 4 again (a normal change, not a re-assert)
+    ftInit(&t, &cfg, 8.0f, true);
+    CHECK(t.reg29 == BATTERY_LED_MODE_RED);
+    ra = sleepCycle(&t, &cfg, 8.0f, true, 0xFF, &sl, &wk);
+    CHECK(sl == 5 && wk == 5 && ra == 0 && t.reg29 == 4);
+
+    // 5. Lid open at a blue level: the wake byte is the awake blue mode, so 0x29 is right before the thread runs
+    cfg.blueMode = 1;
+    ftInit(&t, &cfg, 50.0f, false);
+    ra = sleepCycle(&t, &cfg, 50.0f, false, 0xFF, &sl, &wk);
+    CHECK(sl == 5 && wk == 1 && ra == 0 && t.reg29 == 1);
+    cfg.blueMode = 5;
+
+    // 6. sleep_mode system: ptm stock (2 / 0); nothing written at sleep; after wake the thread restores blue
+    //    (the stock wake byte 0 shows as a mismatch once the lid is open, as before this change)
+    cfg.sleepMode = BATTERY_LED_SLEEP_SYSTEM;
+    ftInit(&t, &cfg, 50.0f, false);
+    w0 = t.writes;
+    ra = sleepCycle(&t, &cfg, 50.0f, false, 0xFF, &sl, &wk);
+    CHECK(sl == 2 && wk == 0 && t.reg29 == 5 && ra == 1 && t.writes == w0 + 1);
+    cfg.sleepMode = 5;
+
+    printf("sleep transition: no re-assert between sleep entry and wake (blue / red / blink / charging / system)\n");
+}
+
 static void unitTests(void)
 {
     BatteryLedConfig cfg;
@@ -436,6 +659,7 @@ static void unitTests(void)
     cfg.sleepMode = BATTERY_LED_DEFAULT_SLEEP_MODE;
 
     sleepSettingTests();
+    sleepTransitionTests();
 
     // Shutdown latch: "power off" exactly once at the first signal, nothing afterwards
     {

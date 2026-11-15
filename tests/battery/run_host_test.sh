@@ -20,8 +20,9 @@
 #     the sessions newest first gives the same curve.bin as build_curve.py
 #   - LED logic unit tests + replay of the sessions with that curve (led_host_test.c)
 # Always (with or without sessions):
-#   - ptm sleep LED patch: decision + verification unit tests (ptm_host_test.c). With the New 3DS ptm
-#     dump (GodMode9 "Extract .code" of 0004013020002202) also checks the pattern in the real code.
+#   - ptm sleep / wake LED patch: decision matrix + verification unit tests (ptm_host_test.c). With the
+#     New 3DS ptm dump (GodMode9 "Extract .code" of 0004013020002202) also checks both patterns in the
+#     real code (in place, stock, unique).
 #     PTM_CODE=<path> selects the dump; default sessions/ptm/0004013020002202.dec.code; SKIPPED if missing.
 #
 # GRAPH_OUT=<dir>: also renders the on-console graph (battery_graph.c) into
@@ -51,7 +52,8 @@ CC="${CC:-$(command -v clang || command -v cc)}"
 "$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror \
     -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
     "$REPO/sysmodules/rosalina/source/battery/battery_curve.c" \
-    "$REPO/sysmodules/rosalina/source/battery/battery_led_logic.c" "$HERE/led_host_test.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_led_logic.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_ptm_patch_logic.c" "$HERE/led_host_test.c" \
     -o "$OUT/led_host_test"
 "$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Wno-format \
     -I "$HERE/host_sd" -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
