@@ -11,6 +11,8 @@
 *   2. Replay: feeds recorded sessions (CSV v1 or v2) through the same code path the LED thread
 *      uses (voltage median sampled every 10 s, BatteryCurve_CorrectedFrom, BatteryLedLogic_Decide)
 *      with the override on and default settings, and prints when the LED changes.
+*      The replay also prints the ptm battery bars level (section 15) and checks that the red / blink bars
+*      switch at the same sample as the red / blinking LED.
 *
 *   Usage: led_host_test [curve.bin session.csv [...]]
 *   Without arguments only the unit tests run (the replay is skipped).
@@ -22,6 +24,7 @@
 #include <string.h>
 #include "battery/battery_curve.h"
 #include "battery/battery_led_logic.h"
+#include "battery/battery_ptm_bars.h"
 #include "battery/battery_mcu.h"
 #include "battery/battery_ptm_patch.h"
 
@@ -936,6 +939,12 @@ static void replay(const char *path)
            number, path, n, tEnd / 3600000.0, cfg.redPct, cfg.blinkPct, cfg.blueMode);
     printf("  %-7s %-8s %7s %4s %8s %9s  %s\n", "elapsed", "left", "MCU %", "volt", "median", "corrected", "LED");
 
+    // ptm battery bars (section 15) from the same level state, and ptm's stock mapping of the MCU's integer %
+    struct { u32 t; float pct, c; u8 bars, stock; } barEv[16];
+    u32 nBarEv = 0;
+    u8 bars = BATTERY_BARS_STOCK, prevBars = 0xFF, prevStock = 0xFF;
+    u32 barChanges = 0;
+
     bool prevCharger = false;
     for (u32 i = 0; i < n; i++)
     {
@@ -963,6 +972,33 @@ static void replay(const char *path)
         in.lastWritten = prevMode == 0xFF ? BATTERY_LED_MODE_UNKNOWN : prevMode;
         u8 mode = BatteryLedLogic_Decide(&l, &cfg, &in, NULL);
 
+        BatteryBarsInputs bi = { true, false, l.onCharger, c, l.levelValid, l.level };
+        bars = BatteryBars_Decide(&cfg, &bi, bars, NULL);
+        u32 pi = (u32)r->pct;
+        u8 stock = pi > 60 ? 5 : pi >= 31 ? 4 : pi >= 11 ? 3 : pi >= 6 ? 2 : pi >= 1 ? 1 : 0;
+        if (!in.shellClosed && !l.onCharger)
+        {
+            // The red / blink bar and the red / blinking LED switch at the same sample
+            CHECK((bars == 2) == (mode == BATTERY_LED_MODE_RED));
+            CHECK((bars == 1) == (mode == BATTERY_LED_MODE_BLINK));
+        }
+        if ((bars != prevBars || stock != prevStock) && nBarEv < 16)
+        {
+            barEv[nBarEv].t = r->t;
+            barEv[nBarEv].pct = r->pct;
+            barEv[nBarEv].c = c;
+            barEv[nBarEv].bars = bars;
+            barEv[nBarEv].stock = stock;
+            nBarEv++;
+        }
+        if (prevBars != 0xFF && bars != prevBars)
+        {
+            CHECK(bars + 1 == prevBars); // one step at a time, never back up within the discharge
+            barChanges++;
+        }
+        prevBars = bars;
+        prevStock = stock;
+
         // Same thresholds without the "only gets worse" rule, to count the flapping it prevents
         u8 raw = c <= cfg.blinkPct ? 2 : c <= cfg.redPct ? 1 : 0;
         if (rawPrev != 0xFF && raw != rawPrev)
@@ -986,6 +1022,18 @@ static void replay(const char *path)
     printf("  LED changes: %u (expected 2: blue -> red -> blink), threshold crossings without the ratchet: %u, min corrected %.2f\n",
            changes, rawFlaps, minCorr);
     CHECK(changes == 2);
+
+    printf("  HOME Menu level (5 = 4 bars, 4 = 3, 3 = 2, 2 = 1 red bar, 1 = blinking): corrected (bars) vs stock (MCU)\n");
+    printf("  %-7s %-8s %7s %9s  %s  %s\n", "elapsed", "left", "MCU %", "corrected", "bars", "stock");
+    for (u32 k = 0; k < nBarEv; k++)
+    {
+        char el[16], left[16];
+        fmtMin(el, barEv[k].t);
+        fmtMin(left, tEnd - barEv[k].t);
+        printf("  %-7s %-8s %7.3f %9.2f  %4u  %5u\n", el, left, barEv[k].pct, barEv[k].c, barEv[k].bars, barEv[k].stock);
+    }
+    printf("  bars changes: %u (expected 4: 5 -> 4 -> 3 -> 2 -> 1)\n", barChanges);
+    CHECK(barChanges == 4);
 }
 
 int main(int argc, char **argv)

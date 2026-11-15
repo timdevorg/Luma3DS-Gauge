@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "battery/battery_led_logic.h"
+#include "battery/battery_ptm_bars.h"
 
 // ---- Settings ----
 
@@ -21,6 +22,9 @@ void BatteryLedConfig_Defaults(BatteryLedConfig *cfg)
     cfg->blinkPct = BATTERY_LED_DEFAULT_BLINK_PCT;
     cfg->blueMode = BATTERY_LED_DEFAULT_BLUE_MODE;
     cfg->sleepMode = BATTERY_LED_DEFAULT_SLEEP_MODE;
+    cfg->bars = BATTERY_BARS_DEFAULT_ON;
+    cfg->bars4Pct = BATTERY_BARS_DEFAULT_4;
+    cfg->bars3Pct = BATTERY_BARS_DEFAULT_3;
 }
 
 static bool batteryLedSleepSettingValid(u8 m)
@@ -42,6 +46,18 @@ void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg)
         cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // legacy anim(2): same stock ptm behaviour as off
     else if (!batteryLedSleepSettingValid(cfg->sleepMode))
         cfg->sleepMode = BATTERY_LED_DEFAULT_SLEEP_MODE;
+
+    // Bars thresholds (section 15): bars_4 > bars_3 > red_pct, bars_4 <= 100; else the defaults. A red_pct of 40 or
+    // more (max 50) makes the default bars_3 invalid too: then bars_3 just above red_pct
+    if (!(cfg->bars4Pct <= BATTERY_BARS_MAX_PCT && cfg->bars4Pct > cfg->bars3Pct && cfg->bars3Pct > cfg->redPct))
+    {
+        cfg->bars4Pct = BATTERY_BARS_DEFAULT_4;
+        cfg->bars3Pct = BATTERY_BARS_DEFAULT_3;
+        if (cfg->bars3Pct <= cfg->redPct)
+            cfg->bars3Pct = cfg->redPct + 1;
+        if (cfg->bars4Pct <= cfg->bars3Pct)
+            cfg->bars4Pct = cfg->bars3Pct + 1;
+    }
 }
 
 bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
@@ -99,6 +115,21 @@ bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
             else if (keyLen == 10 && strncmp(p, "sleep_mode", 10) == 0)
             {
                 cfg->sleepMode = v8; // invalid values become the default in BatteryLedConfig_Sanitize
+                any = true;
+            }
+            else if (keyLen == 4 && strncmp(p, "bars", 4) == 0)
+            {
+                cfg->bars = v != 0;
+                any = true;
+            }
+            else if (keyLen == 6 && strncmp(p, "bars_4", 6) == 0)
+            {
+                cfg->bars4Pct = v8; // checked together with bars_3 / red_pct in BatteryLedConfig_Sanitize
+                any = true;
+            }
+            else if (keyLen == 6 && strncmp(p, "bars_3", 6) == 0)
+            {
+                cfg->bars3Pct = v8;
                 any = true;
             }
         }
@@ -290,6 +321,17 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
     }
     bool charger = l->onCharger;
 
+    // Level state: kept up to date whenever there is a curve (also with the override off or in the error state),
+    // because the ptm bars patch (section 15) takes its red / blink steps from it. The LED decision below is
+    // unchanged; switching the override on re-evaluates the level with hysteresis as before.
+    if (!in->shuttingDown && in->corrected >= 0.0f)
+    {
+        if (charger)
+            batteryLedChargeLevel(l, cfg, in);
+        else
+            batteryLedDischargeLevel(l, cfg, in->corrected);
+    }
+
     if (in->shuttingDown)
     {
         reason = BATTERY_LED_REASON_SHUTDOWN;
@@ -303,11 +345,6 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
         reason = BATTERY_LED_REASON_NO_CURVE;
     else
     {
-        if (charger)
-            batteryLedChargeLevel(l, cfg, in);
-        else
-            batteryLedDischargeLevel(l, cfg, in->corrected);
-
         if (in->shellClosed)
         {
             reason = BATTERY_LED_REASON_SHELL;

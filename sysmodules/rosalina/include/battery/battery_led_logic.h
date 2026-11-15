@@ -53,6 +53,9 @@ typedef struct BatteryLedConfig
     u8 blinkPct;    // blinking red at corrected <= blinkPct (0..redPct-1)
     u8 blueMode;    // BATTERY_LED_MODE_BLUE (5) or BATTERY_LED_MODE_BLUE_FORCED (1)
     u8 sleepMode;   // blue level at sleep: 1 dim (default), 5 bright or BATTERY_LED_SLEEP_SYSTEM (0, off)
+    bool bars;      // HOME Menu battery bars from the corrected % (ptm bars patch, section 15; default on)
+    u8 bars4Pct;    // 4 bars at corrected >= bars4Pct (default 70; bars4Pct > bars3Pct > redPct)
+    u8 bars3Pct;    // 3 bars at corrected >= bars3Pct (default 40)
 } BatteryLedConfig;
 
 typedef enum BatteryLedLevel
@@ -149,11 +152,12 @@ typedef struct BatteryLedSmoother
 
 void BatteryLedConfig_Defaults(BatteryLedConfig *cfg);
 /// Parses config.ini ("key=value" lines, '#' comments; keys led_override, red_pct, blink_pct,
-/// blue_mode, sleep_mode (a number, or "system" / "anim" = 0; legacy 2 -> 0); unknown keys ignored). Only keys present are changed. Returns true if any key was found.
+/// blue_mode, sleep_mode (a number, or "system" / "anim" = 0; legacy 2 -> 0), bars, bars_4, bars_3; unknown keys ignored). Only keys present are changed. Returns true if any key was found.
 /// Call BatteryLedConfig_Sanitize afterwards.
 bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg);
-/// Clamps the values to the allowed ranges (blink < red, blue mode 1 or 5, sleep mode 5 / 1 / 2 / system,
-/// anything else -> the default 5).
+/// Clamps the values to the allowed ranges (blink < red, blue mode 1 or 5, sleep mode 1 / 5 / off, anything
+/// else -> the default 1; bars_4 > bars_3 > red_pct and bars_4 <= 100, else the defaults 70 / 40, and if red_pct
+/// is 40 or more: bars_3 = red_pct + 1, bars_4 = max(70, bars_3 + 1)).
 void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg);
 
 void BatteryLedLogic_Init(BatteryLedLogic *l);
