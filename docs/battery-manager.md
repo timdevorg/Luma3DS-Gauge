@@ -13,8 +13,8 @@ red only appear when the battery is actually low.
 > It is the only code that writes to the MCU (reg `0x29`, mode byte only) and is **off** until you
 > switch it on in the menu. Since [section 14](#14-ptm-sleep-and-wake-led-patch-milestone-4c) it also changes two
 > verified bytes in the running ptm process's RAM so that ptm's own sleep and wake LED commands match the
-> corrected level. The sleep byte at a blue level is **tested on hardware** (blue during sleep, 13.10); the
-> red-level sleep byte, the charging rule and the wake byte are **not yet tested on hardware** (14.9).
+> corrected level. The sleep byte at a blue level (13.10), the red-level `04` / `04` and the stock blink case
+> (13.12) are **tested on hardware**; "charging = always blue" (13.3) is **not yet tested on hardware** (14.9).
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -677,7 +677,7 @@ Updated by section 13 (charging, lid, shutdown):
 | Condition | Mode written |
 |---|---|
 | override off, no curve, control error | automatic (0), once, and only if we had written something else |
-| adapter / charging | as below, from the MCU-table corrected %, level only gets better (13.3) |
+| adapter / charging (debounced unplug) | `blue_mode` at any level, including red / blinking (13.3) |
 | lid closed or sleep requested | blue, or charging with Sleep LED dim / bright → Sleep LED setting (default dim = 1; bright = 5; nothing for off, 12.11); red / blinking kept; nothing if nothing written this boot (13.2, 13.9, 14.2) |
 | shutdown | 3 ("power off") once if we own the LED, then nothing (13.5) |
 | corrected > red threshold (default 10 %) | `blue_mode` (default 5, or 1) |
@@ -685,8 +685,8 @@ Updated by section 13 (charging, lid, shutdown):
 | corrected ≤ blink threshold | 6 (blinking red) |
 
 - **Only gets worse**: within one discharge the level goes blue → red → blinking, never back, so the
-  voltage recovering after a load drop can't make the LED flap. Unplugging the charger restarts it from
-  the corrected % at that moment (13.3).
+  voltage recovering after a load drop can't make the LED flap. Unplugging the charger (debounced, 13.3)
+  restarts it from the corrected % at that moment.
 - **Hysteresis (0.5 points)**: after a settings change (thresholds, blue mode, override switched on) the
   level is re-evaluated once and may get better, but only if the corrected % is more than 0.5 above the
   threshold (e.g. red → blue after lowering X from 10 to 8 at 9.0 %, but not at 8.3 %). Raising a
@@ -964,17 +964,27 @@ during sleep entry when the LED is red.
 
 ### 13.3 Charging (issue 2)
 
-The LED stays under control while the adapter is plugged in (`0x0F` bit3, or bit4):
+> Changed (milestone 4e): **while charging the LED is always blue, awake and asleep.** Before, awake used the
+> MCU-table level that could only get better (so it stayed red at a red level) while the sleep byte was blue:
+> blue while asleep, red again on opening.
 
-- Corrected % from the curve's **MCU table only** (no voltage blend: the voltage is elevated while charging).
-- The level starts from the discharge level and may only get **better** during one charge (red → blue,
-  with the 0.5-point hysteresis), never worse. Booting on the charger (or a threshold change while
-  charging) starts from the corrected % as it is.
-- Fully charged (adapter in, charging flag clear, MCU ≥ 95 %): blue.
-- Unplugged: the voltage median is reset (no charging voltages in it) and the discharge logic restarts from
-  the corrected % at that moment, in either direction; from there it only gets worse again.
-- The `0x7F` / `0x29` mismatch watch keeps running. Status reason: `charging`.
-- Override off / no curve: unchanged (automatic only to undo our own write, else nothing).
+The LED stays under control while the adapter is plugged in (`0x0F` bit3) or the charging flag is set (bit4):
+
+- Desired mode: **`blue_mode` (5 or 1) at any corrected level**, blue, red or blinking. Status reason `charging`.
+- **Debounce.** Plugged in counts at once (next poll, ≤ 1 s). Unplugged only after the adapter **and** the
+  charging flag have both been clear on `BATTERY_LED_UNPLUG_DECISIONS` = 3 decisions in a row (about 3 s at
+  1 s polling, less while polling fast; a sleep notification also runs a decision). A flickering charging
+  flag with the adapter in never leaves the charger state at all; a brief drop of both shorter than 3
+  decisions doesn't either. So the LED can't toggle blue ↔ red.
+- **Unplugged (after the debounce):** the "only gets worse" baseline restarts from the corrected % at that
+  moment, in either direction (red level → red, blue level → blue), and from there only gets worse again.
+  The voltage median is reset at the raw unplug (no elevated charging voltages in it) and refills with fresh
+  samples, as before; the corrected % uses the MCU table only while the adapter / flag is raw-set.
+- The level is still tracked internally while charging (MCU table, only better), but only used for the
+  lid-closed mode with Sleep LED `off` (red / blinking kept, 12.11). Awake it doesn't affect the LED.
+- The `0x7F` / `0x29` mismatch watch keeps running.
+- Override off / no curve / error / shutdown / LED test: unchanged (automatic only to undo our own write,
+  else nothing).
 
 ### 13.4 Boot (issue 3)
 
@@ -1044,6 +1054,16 @@ mismatch watch while charging, shutdown writes 3 exactly once and nothing after 
 exit, menu, test screen), 0x29 already 3, nothing written when nothing was written this boot, whitelist
 rejects 7 and other values. With the earlier session CSVs the replay is unchanged (2 LED changes per
 session, same times as in 12.8).
+
+Milestone 4e replaced the charging tests: charging at the blue / red / blink level (adapter, flag only,
+paused, boot on the charger, `blue_mode` 1) → `blue_mode`; a flickering charge flag (both clear for fewer
+than 3 decisions, 20 times) → always blue; unplugging at a red level → red after exactly 3 decisions, at a
+blue level → blue, at the blink level → blink; and a fake-thread sleep cycle while charging at red / blink /
+blue × `blue_mode` 5 / 1 × Sleep LED dim / bright: sleep byte = Sleep LED value, wake byte = `blue_mode` =
+what the thread wants after wake (no write, no re-assert). The old "only better while charging" and
+"fully charged → blue" expectations are gone (the LED is blue on the charger anyway); the old sleep case
+"charging at red → wake → thread writes 4" now expects blue to stay. The replays are unchanged (the
+session CSVs are discharges).
 
 ### 13.8 On-device checklist
 
@@ -1125,6 +1145,14 @@ Change: the Sleep LED setting now has three options, **dim** (`1`, the new defau
 and **off (stock)** (`0`, legacy `2` / `system` / `anim`), see 12.11. Red / blink behaviour and the wake
 byte (`blue_mode`) are unchanged.
 
+### 13.12 On-device: red and blink sleep tests passed; charging always blue (milestone 4e)
+
+- **Solid red** (14.9 step 2): Status `ptm patch: sleep 04 wake 04`, wake read-back 4, steady red while
+  closed, no blink. Passed.
+- **Blink level** (step 3): stock `02` / `00`, wake read-back 0. Passed.
+- Found: charging at a red level showed blue while asleep (charging sleep rule) but red again on opening
+  (old awake charging rule). Fixed by making charging always blue awake too (13.3).
+
 ## 14. ptm sleep and wake LED patch (milestone 4c)
 
 ### 14.1 Finding
@@ -1186,7 +1214,7 @@ the mode the Battery Manager wants at sleep and on wake. Decided from the state 
 | Situation at sleep entry | Sleep byte (`0x101a28`) | Wake byte (`0x10199e`) |
 |---|---|---|
 | level **blue** | Sleep LED value: `01` (dim) / `05` (bright) | `blue_mode`: `05` / `01` |
-| **charging** (adapter plugged in or charging flag), any level | Sleep LED value `01` / `05` | `blue_mode` `05` / `01` |
+| **charging** (adapter plugged in or charging flag, debounced), any level | Sleep LED value `01` / `05` | `blue_mode` `05` / `01` (= what the thread writes after wake while still charging) |
 | level **red** (solid red) | `04` (red on, blue off, no MCU battery check) | `04` |
 | level **blinking** (corrected ≤ blink threshold) | `02` (stock: the MCU's genuine low warning) | `00` (stock) |
 | Sleep LED off (stock) | `02` (stock) | `00` (stock) |
@@ -1206,8 +1234,10 @@ the mode the Battery Manager wants at sleep and on wake. Decided from the state 
   (counted as one re-assert per wake).
 - **Charging edge cases.** The bytes are decided at sleep entry, and nothing of ours runs while asleep.
   Unplugged during sleep: the LED stays blue until the lid opens; on wake the thread restarts the
-  discharge logic and shows the real level within about a second. Woken while still charging at a red
-  level: wake byte blue, then the thread writes 4 (the awake charging rule, 13.3) within about a second.
+  discharge logic (after the ~3 s unplug debounce) and shows the real level. Woken while still charging at
+  any level: wake byte `blue_mode`, and the thread wants `blue_mode` too (13.3), so no write and no
+  blue → red on opening. Plugged in during sleep: no effect until the lid opens (14.10). With Sleep LED
+  `off (stock)` ptm stays stock (`02` / `00`); awake the charging rule still applies (blue).
 
 **When it is applied** (the page is only mapped if at least one byte differs from what was last verified /
 written; both bytes are written in the same mapping):
@@ -1383,10 +1413,11 @@ Anything with `off:` → note it and stop (the patch refused; nothing was writte
 3. **Blink level → stock.** Raise the blink threshold above the corrected %. Status `sleep 02 wake 00
    (stock)`. Close the lid: the MCU's own sleep / low indication (stock behaviour). Open: blinking red again
    within ~1 s (re-asserts +1).
-4. **Charging at a red level → lid → blue.** Red level (step 2), plug in the charger. Close the lid: LED
-   blue while closed. Open: blue, then red within ~1 s if still at a red level (charging rule, 13.3).
-   Status after opening: `sleep 01 wake 05` (dim; `05` / `05` with bright) (the bytes are re-decided at lid close, boot and settings
-   changes, not when the charger is plugged in while awake).
+4. **Charging at a red level → blue, awake and asleep.** Red level (step 2), plug in the charger: blue within
+   ~1 s. Close the lid: blue while closed (dim / bright). Open: **stays blue**, `Reasserts` unchanged.
+   Repeat at the blink level. Unplug at a red level: red again after ~3 s (debounce); at a blue level: stays
+   blue. Status after the lid close: `sleep 01 wake 05` (dim; `05` / `05` with bright) (the bytes are
+   re-decided at lid close, boot and settings changes, not when the charger is plugged in while awake).
 5. **Opening the lid at a blue level → no red flash.** Repeat step 1 several times, watching the LED as the
    lid opens: blue throughout, no red flash. `Reasserts` unchanged.
 6. **Sleep LED `off (stock)` → stock.** Status `sleep 02 wake 00 (stock)`; lid closed → stock behaviour (red
@@ -1394,6 +1425,8 @@ Anything with `off:` → note it and stop (the patch refused; nothing was writte
 
 ### 14.10 Known limitations
 
+- **A charger plugged in (or unplugged) during sleep can't change the LED until the lid opens.** Nothing of
+  ours runs while asleep; the bytes were decided at sleep entry.
 - **The first ~5 s after power-on** are driven by the MCU in automatic mode (red blinking when the MCU
   thinks the battery is low): nothing of ours runs until Rosalina starts and the LED thread takes over
   (13.4). A possible future idea is an early LED write from Luma's arm9 code before the ARM11 side boots;

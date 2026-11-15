@@ -895,8 +895,8 @@ void BatteryMenu_Thresholds(void)
         y += SPACING_Y;
         y = batteryMenuLine(y, COLOR_WHITE, "Blinking must be below solid red.");
         y = batteryMenuLine(y, COLOR_WHITE, "Within one discharge the LED only gets");
-        y = batteryMenuLine(y, COLOR_WHITE, "worse (blue -> red -> blinking), while");
-        y = batteryMenuLine(y, COLOR_WHITE, "charging only better. After a change it");
+        y = batteryMenuLine(y, COLOR_WHITE, "worse (blue -> red -> blinking); while");
+        y = batteryMenuLine(y, COLOR_WHITE, "charging always blue. After a change it");
         y = batteryMenuLine(y, COLOR_WHITE, "may get better if the corrected %% is more");
         y = batteryMenuLine(y, COLOR_WHITE, "than 0.5 points above the new threshold.");
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Up/Down: select  Left/Right: change  B: save");

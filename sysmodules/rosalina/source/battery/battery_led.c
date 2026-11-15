@@ -11,7 +11,7 @@
 *     BatteryMcu_SetPowerLedMode() (the only MCU write; reg 0x29, mode byte, whitelisted modes).
 *     It writes only when the desired mode changes, or to re-apply it after a mismatch
 *     (at most once per 250 ms).
-*   - Keeps controlling while the adapter is plugged in (MCU table only, the level only gets better).
+*   - Keeps controlling while the adapter is plugged in: blue_mode at any level (debounced unplug).
 *   - Lid closed / sleep requested: writes the Sleep LED setting (default 5; 1, 2, or nothing for
 *     "system") if the LED is blue, keeps red / blinking red; remembers what it wrote and reads 0x29
 *     back on wake (before anything is written) for the Status screen; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
@@ -211,7 +211,7 @@ static void batteryLedSleepLocked(u64 nowMs, bool entering)
         return;
 
     u8 desired = batteryLedDecideLocked();
-    bool charger = (g_led.flags & (BATTERY_MCU_FLAG_ADAPTER | BATTERY_MCU_FLAG_CHARGING)) != 0;
+    bool charger = g_led.logic.onCharger; // debounced, the same state Decide used just now
     u8 level = BatteryLedLogic_SleepLevel(&g_led.cfg, g_led.logic.level, charger);
     u8 mode = BatteryLedLogic_SleepWrite(desired, g_led.reason, level, g_led.watch.lastWritten, entering);
     if (mode != BATTERY_LED_MODE_KEEP && batteryLedWriteLocked(mode, nowMs)) // not rate limited: last chance before sleep

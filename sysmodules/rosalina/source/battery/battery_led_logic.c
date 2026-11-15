@@ -119,6 +119,7 @@ void BatteryLedLogic_Init(BatteryLedLogic *l)
     l->levelValid = false;
     l->reevaluate = false;
     l->onCharger = false;
+    l->chargerOffCount = 0;
 }
 
 void BatteryLedLogic_Reevaluate(BatteryLedLogic *l)
@@ -246,7 +247,8 @@ static void batteryLedDischargeLevel(BatteryLedLogic *l, const BatteryLedConfig 
         l->level = fresh;
 }
 
-// On the adapter: the level only gets better (red -> blue), with hysteresis, never worse
+// On the adapter: the level only gets better (red -> blue), with hysteresis, never worse. Awake on the charger
+// the LED is blue whatever this level is; it is only used for the lid-closed mode with Sleep LED off (red kept)
 static void batteryLedChargeLevel(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in)
 {
     if (!l->levelValid || l->reevaluate)
@@ -271,16 +273,22 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
 {
     u8 reason;
     u8 mode = BATTERY_LED_MODE_AUTO;
-    bool charger = in->adapter || in->charging;
-
-    // Plugged in: the charge starts from the current level. Unplugged: a new discharge starts from the
-    // corrected % at that moment (the "only gets worse" ratchet restarts there).
-    if (charger != l->onCharger)
+    // Debounced charger state: plugged in counts at once; unplugged only after BATTERY_LED_UNPLUG_DECISIONS
+    // decisions in a row with the adapter and the charging flag both clear, so a flickering charging flag can't
+    // toggle the LED blue <-> red. On the debounced unplug a new discharge starts from the corrected % at that
+    // moment (the "only gets worse" ratchet restarts there, in either direction).
+    if (in->adapter || in->charging)
     {
-        l->onCharger = charger;
-        if (!charger)
-            l->levelValid = false;
+        l->onCharger = true;
+        l->chargerOffCount = 0;
     }
+    else if (l->onCharger && ++l->chargerOffCount >= BATTERY_LED_UNPLUG_DECISIONS)
+    {
+        l->onCharger = false;
+        l->chargerOffCount = 0;
+        l->levelValid = false;
+    }
+    bool charger = l->onCharger;
 
     if (in->shuttingDown)
     {
@@ -312,8 +320,9 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
         }
         else
         {
+            // Charging: always blue_mode, at any level (also matches the ptm wake byte after a sleep on the charger)
             reason = charger ? BATTERY_LED_REASON_CHARGER : BATTERY_LED_REASON_ACTIVE;
-            mode = BatteryLedLogic_ModeForLevel(cfg, l->level);
+            mode = charger ? cfg->blueMode : BatteryLedLogic_ModeForLevel(cfg, l->level);
         }
     }
 

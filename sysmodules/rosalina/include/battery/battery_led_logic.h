@@ -31,6 +31,8 @@
 #define BATTERY_LED_VOLT_WINDOW         6     // voltage median over this many samples
 #define BATTERY_LED_VOLT_SAMPLE_MS      10000u // one voltage sample every 10 s (window ~1 min, like the curve)
 #define BATTERY_LED_FULL_MCU_PCT        95.0f // adapter in, not charging, MCU >= this: fully charged -> blue
+#define BATTERY_LED_UNPLUG_DECISIONS    3     // charger debounce: adapter and charging flag both clear on this many
+                                              // decisions in a row (~3 s at 1 s polling) before "unplugged"
 
 // Defaults and limits of the settings (config.ini)
 #define BATTERY_LED_DEFAULT_RED_PCT     10
@@ -66,7 +68,7 @@ typedef enum BatteryLedReason
     BATTERY_LED_REASON_ACTIVE = 0,  // override on, LED set from the corrected %
     BATTERY_LED_REASON_OFF,         // override off
     BATTERY_LED_REASON_NO_CURVE,
-    BATTERY_LED_REASON_CHARGER,     // adapter plugged in / charging: LED set from the MCU table, only gets better
+    BATTERY_LED_REASON_CHARGER,     // adapter plugged in / charging (debounced): blue_mode at any level
     BATTERY_LED_REASON_SHELL,       // lid closed / going to sleep: sleep animation (blue) or red kept
     BATTERY_LED_REASON_SHUTDOWN,    // shutdown: "power off" written once (if we owned the LED), then never again
     BATTERY_LED_REASON_ERROR,       // gave up (write failures / MCU keeps overriding)
@@ -94,7 +96,9 @@ typedef struct BatteryLedLogic
     u8 level;           // BatteryLedLevel
     bool levelValid;    // false: the next decision takes the level from the corrected % as it is
     bool reevaluate;    // next decision may make the level better (with hysteresis)
-    bool onCharger;     // adapter / charging seen on the last decision
+    bool onCharger;     // debounced charger state: set at once when adapter / charging is seen, cleared only after
+                        // BATTERY_LED_UNPLUG_DECISIONS decisions in a row without either
+    u8 chargerOffCount; // decisions in a row with adapter and charging flag clear while onCharger
 } BatteryLedLogic;
 
 /// One-way shutdown latch. The first shutdown signal may write "power off" (3) once; after that
@@ -156,7 +160,8 @@ void BatteryLedLogic_Init(BatteryLedLogic *l);
 /// Call after a settings change (thresholds, override switched on): the next decision may make the LED
 /// better, but only if the corrected % is more than BATTERY_LED_HYSTERESIS above the threshold.
 void BatteryLedLogic_Reevaluate(BatteryLedLogic *l);
-/// Desired LED mode (BATTERY_LED_MODE_*). Updates the discharge level. *outReason may be NULL.
+/// Desired LED mode (BATTERY_LED_MODE_*). Updates the discharge level and the debounced charger state
+/// (l->onCharger). Awake on the charger: cfg->blueMode at any level. *outReason may be NULL.
 u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in, u8 *outReason);
 /// Mode for a level.
 u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level);

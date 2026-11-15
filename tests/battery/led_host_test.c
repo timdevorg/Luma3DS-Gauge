@@ -470,12 +470,28 @@ static void sleepTransitionTests(void)
     ra = sleepCycle(&t, &cfg, 2.0f, false, 0xFF, &sl, &wk);
     CHECK(sl == 2 && wk == 0 && t.reg29 == 6 && ra == 1);
 
-    // 4. Charging at a red level -> lid -> blue: the hook writes 5, ptm sends 5 / 5; on wake, still charging at red,
-    //    the thread writes 4 again (a normal change, not a re-assert)
-    ftInit(&t, &cfg, 8.0f, true);
-    CHECK(t.reg29 == BATTERY_LED_MODE_RED);
-    ra = sleepCycle(&t, &cfg, 8.0f, true, 0xFF, &sl, &wk);
-    CHECK(sl == 5 && wk == 5 && ra == 0 && t.reg29 == 4);
+    // 4. Charging at a red / blink / blue level -> lid -> blue: awake the thread already shows blue_mode; the hook
+    //    writes the Sleep LED value, ptm sends sleep = Sleep LED / wake = blue_mode, and after wake (still charging)
+    //    the thread wants exactly the wake byte: no write, no re-assert, no blue -> red on opening
+    {
+        static const float lv[] = { 8.0f, 2.0f, 50.0f };
+        for (u32 i = 0; i < 3; i++)
+            for (u32 bm = 0; bm < 2; bm++)
+                for (u32 sm = 0; sm < 2; sm++)
+                {
+                    cfg.blueMode = bm ? BATTERY_LED_MODE_BLUE_FORCED : BATTERY_LED_MODE_BLUE;
+                    cfg.sleepMode = sm ? BATTERY_LED_MODE_BLUE_FORCED : BATTERY_LED_MODE_BLUE;
+                    ftInit(&t, &cfg, lv[i], true);
+                    CHECK(t.reg29 == cfg.blueMode);
+                    ra = sleepCycle(&t, &cfg, lv[i], true, 0xFF, &sl, &wk);
+                    u32 wAfterWake = t.writes;
+                    CHECK(sl == cfg.sleepMode && wk == cfg.blueMode && ra == 0 && t.reg29 == wk);
+                    ftPoll(&t, &cfg, lv[i], true, false, false);
+                    CHECK(t.writes == wAfterWake && t.reg29 == wk);
+                }
+        cfg.blueMode = 5;
+        cfg.sleepMode = 5;
+    }
 
     // 5. Lid open at a blue level: the wake byte is the awake blue mode, so 0x29 is right before the thread runs
     cfg.blueMode = 1;
@@ -521,46 +537,52 @@ static void unitTests(void)
     CHECK(decide(&l, &cfg, 10.4f) == BATTERY_LED_MODE_RED);
     CHECK(decide(&l, &cfg, 30.0f) == BATTERY_LED_MODE_RED);
 
-    // Charging: controlled, MCU-table corrected %, only gets better (with hysteresis), never worse
+    // Charging (adapter or charging flag, debounced): always blue_mode, at any level (blue / red / blink)
     BatteryLedLogic_Init(&l);
     CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
     in = inputs(2.0f);
     in.adapter = true;
     in.charging = true;
-    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_BLINK && reason == BATTERY_LED_REASON_CHARGER);
-    CHECK(decideCharging(&l, &cfg, 3.4f, true, 3.0f) == BATTERY_LED_MODE_BLINK);  // 3.4 <= 3.5: not yet
-    CHECK(decideCharging(&l, &cfg, 3.6f, true, 3.0f) == BATTERY_LED_MODE_RED);    // > blink + 0.5
-    CHECK(decideCharging(&l, &cfg, 1.0f, true, 3.0f) == BATTERY_LED_MODE_RED);    // never worse while charging
-    CHECK(decideCharging(&l, &cfg, 10.4f, true, 9.0f) == BATTERY_LED_MODE_RED);
-    CHECK(decideCharging(&l, &cfg, 10.6f, true, 9.0f) == BATTERY_LED_MODE_BLUE);  // > red + 0.5
-    CHECK(decideCharging(&l, &cfg, 5.0f, true, 9.0f) == BATTERY_LED_MODE_BLUE);   // stays blue
-    // Adapter without the charging flag (charge paused) at a low %: not "full", the ratchet still applies
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, &reason) == BATTERY_LED_MODE_BLUE && reason == BATTERY_LED_REASON_CHARGER);
+    CHECK(decideCharging(&l, &cfg, 1.0f, true, 1.0f) == BATTERY_LED_MODE_BLUE);     // blink level
+    CHECK(decideCharging(&l, &cfg, 8.0f, true, 8.0f) == BATTERY_LED_MODE_BLUE);     // red level
+    CHECK(decideCharging(&l, &cfg, 50.0f, true, 50.0f) == BATTERY_LED_MODE_BLUE);   // blue level
+    CHECK(decideCharging(&l, &cfg, 8.0f, false, 20.0f) == BATTERY_LED_MODE_BLUE);   // adapter, charge paused
+    in = inputs(8.0f);
+    in.charging = true;                                                               // charging flag only
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_BLUE);
+    cfg.blueMode = BATTERY_LED_MODE_BLUE_FORCED;
+    CHECK(decideCharging(&l, &cfg, 8.0f, true, 8.0f) == BATTERY_LED_MODE_BLUE_FORCED);
+    cfg.blueMode = BATTERY_LED_MODE_BLUE;
+    BatteryLedLogic_Init(&l);                                                         // boot on the charger at red
+    CHECK(decideCharging(&l, &cfg, 5.0f, true, 1.0f) == BATTERY_LED_MODE_BLUE);
+    // Flickering charge flag (adapter and flag clear for fewer than BATTERY_LED_UNPLUG_DECISIONS decisions): no toggling
     BatteryLedLogic_Init(&l);
-    CHECK(decide(&l, &cfg, 8.0f) == BATTERY_LED_MODE_RED);
-    CHECK(decideCharging(&l, &cfg, 8.0f, false, 20.0f) == BATTERY_LED_MODE_RED);
-    // Fully charged (adapter in, not charging, MCU >= 95): blue whatever the curve says
-    CHECK(decideCharging(&l, &cfg, 8.0f, false, 96.0f) == BATTERY_LED_MODE_BLUE);
-    CHECK(decideCharging(&l, &cfg, 8.0f, true, 96.0f) == BATTERY_LED_MODE_BLUE);  // and never worse after
-    // Unplugged: the discharge restarts from the corrected % at that moment (either direction)
-    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);    // blue during the charge, red now
-    CHECK(decide(&l, &cfg, 30.0f) == BATTERY_LED_MODE_RED);   // and only worse again
+    CHECK(decideCharging(&l, &cfg, 8.0f, true, 8.0f) == BATTERY_LED_MODE_BLUE);
+    for (u32 i = 0; i < 20; i++)
+    {
+        for (u32 k = 0; k + 1 < BATTERY_LED_UNPLUG_DECISIONS; k++)
+            CHECK(decide(&l, &cfg, 8.0f) == BATTERY_LED_MODE_BLUE);
+        CHECK(decideCharging(&l, &cfg, 8.0f, i & 1, 8.0f) == BATTERY_LED_MODE_BLUE);
+    }
+    // Unplugged (debounced): the discharge restarts from the corrected % at that moment, in either direction
     BatteryLedLogic_Init(&l);
     CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
-    CHECK(decideCharging(&l, &cfg, 3.2f, true, 2.0f) == BATTERY_LED_MODE_BLINK); // short charge, no improvement
-    CHECK(decide(&l, &cfg, 20.0f) == BATTERY_LED_MODE_BLUE);  // unplugged at corrected 20: restarts from there
-    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);
-    BatteryLedLogic_Init(&l);
-    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
+    CHECK(decideCharging(&l, &cfg, 9.0f, true, 9.0f) == BATTERY_LED_MODE_BLUE);
+    for (u32 k = 0; k + 1 < BATTERY_LED_UNPLUG_DECISIONS; k++)
+        CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_BLUE);                       // still debouncing
+    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);                            // unplugged at red -> red
+    CHECK(decide(&l, &cfg, 30.0f) == BATTERY_LED_MODE_RED);                           // and only worse again
+    CHECK(decide(&l, &cfg, 2.5f) == BATTERY_LED_MODE_BLINK);
     CHECK(decideCharging(&l, &cfg, 40.0f, true, 40.0f) == BATTERY_LED_MODE_BLUE);
-    CHECK(decide(&l, &cfg, 40.0f) == BATTERY_LED_MODE_BLUE);  // unplugged after charging
-    CHECK(decide(&l, &cfg, 2.0f) == BATTERY_LED_MODE_BLINK);
-    CHECK(decideCharging(&l, &cfg, 2.2f, true, 1.0f) == BATTERY_LED_MODE_BLINK);
-    CHECK(decide(&l, &cfg, 2.5f) == BATTERY_LED_MODE_BLINK);  // unplugged again right away: still low
-    // Boot on the charger: starts from the corrected % as it is
-    BatteryLedLogic_Init(&l);
-    CHECK(decideCharging(&l, &cfg, 5.0f, true, 1.0f) == BATTERY_LED_MODE_RED);
-    BatteryLedLogic_Init(&l);
-    CHECK(decideCharging(&l, &cfg, 50.0f, true, 30.0f) == BATTERY_LED_MODE_BLUE);
+    for (u32 k = 0; k < BATTERY_LED_UNPLUG_DECISIONS; k++)
+        CHECK(decide(&l, &cfg, 40.0f) == BATTERY_LED_MODE_BLUE);                      // unplugged at blue -> blue
+    CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);                            // normal discharge again
+    CHECK(decide(&l, &cfg, 40.0f) == BATTERY_LED_MODE_RED);
+    CHECK(decideCharging(&l, &cfg, 2.2f, true, 1.0f) == BATTERY_LED_MODE_BLUE);       // short charge at blink level
+    for (u32 k = 0; k < BATTERY_LED_UNPLUG_DECISIONS; k++)
+        decide(&l, &cfg, 2.5f);
+    CHECK(decide(&l, &cfg, 2.5f) == BATTERY_LED_MODE_BLINK);                          // unplugged again: still low
     // Charging + override off / no curve: automatic (nothing to write if nothing was written)
     in = inputs(50.0f);
     in.adapter = true;
