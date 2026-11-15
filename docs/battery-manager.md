@@ -15,6 +15,9 @@ red only appear when the battery is actually low.
 > verified bytes in the running ptm process's RAM so that ptm's own sleep and wake LED commands match the
 > corrected level. The sleep byte at a blue level (13.10), the red-level `04` / `04` and the stock blink case
 > (13.12) are **tested on hardware**; "charging = always blue" (13.3) is **not yet tested on hardware** (14.9).
+> [Section 15](#15-ptm-battery-bars-patch-milestone-5) adds a second, independent ptm patch (four verified bytes) so
+> that HOME Menu's battery bars follow the corrected % too (default on, stock while charging); **not yet tested on
+> hardware**.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -115,17 +118,20 @@ the LED back.
 
 1. The **only** MCU register ever written is `0x29`, mode byte only. Enforce
    this with a whitelist in code.
-   The Battery Manager has exactly **three write paths** (besides its own files under `/luma/battery/`),
-   each verified and whitelisted to documented power LED modes:
+   The Battery Manager has exactly these **write paths** (besides its own files under `/luma/battery/`),
+   each verified and whitelisted:
    - MCU reg `0x29`, mode byte, through `BatteryMcu_SetPowerLedMode()` (whitelist 0..6, section 12.2): the
      only MCU write;
-   - ptm's **sleep byte**: one byte in the RAM of the running ptm process (New 3DS ptm
-     `0004013020002202`, VA `0x101a28`, values `01` / `02` / `04` / `05` only);
-   - ptm's **wake byte**: VA `0x10199e` of the same process, values `00` / `01` / `04` / `05` only.
+   - ptm's **sleep / wake LED bytes** (section 14): two bytes in the RAM of the running ptm process (New 3DS
+     ptm `0004013020002202`): the sleep byte at VA `0x101a28` (`01` / `02` / `04` / `05` only) and the wake
+     byte at VA `0x10199e` (`00` / `01` / `04` / `05` only), through `BatteryPtmPatch_Apply()`;
+   - ptm's **4 battery bar bytes** (section 15), same process: the `cmp` immediates at VA `0x106f5c` and
+     `0x104cd8` (`3C` / `00` only) and the `movs` immediates at VA `0x106f60` and `0x104cdc` (`01`..`05` only),
+     through `BatteryBars_Apply()`.
 
-   Both ptm bytes go through `BatteryPtmPatch_Apply()`, with both 16-byte patterns verified before every
-   write and re-verified after it (section 14). Never another process, never another address, never NAND /
-   firmware / SD.
+   Each ptm patch verifies its own two 16-byte windows before every write and re-verifies them after it;
+   each turns itself off for the boot on any mismatch, independently of the other. Never another process,
+   never another address, never NAND / firmware / SD.
 2. Never touch `0x05–0x07` (MCU unlock sequence, "danger zone").
 3. Open `mcu::HWC` briefly for each access and close it again, like Rosalina does
    (reasoning in section 12.4).
@@ -256,6 +262,7 @@ Original plan below; the implementation is described in [section 12](#12-led-con
    detection, sleep / shutdown hand-back. *Done (code complete, builds, host tests pass; awaiting
    on-device test).* See section 12. Refinements after the on-device tests: section 13; ptm sleep and
    wake LED patch: section 14 (blue during sleep tested on hardware, 13.10).
+   HOME Menu battery bars from the corrected % (ptm patch): section 15 (milestone 5, awaiting on-device test).
 5. Optional extras (4.6). Document findings on 3dbrew.
 
 ## 8. Sources
@@ -768,7 +775,13 @@ blink_pct=3
 blue_mode=5
 # sleep_mode: 1 dim blue (default), 5 bright blue, 0 off (stock ptm, write nothing)
 sleep_mode=1
+# bars: 1 HOME Menu battery bars from the corrected % (default), 0 stock (section 15)
+bars=1
+bars_4=70
+bars_3=40
 ```
+
+`bars`, `bars_4` and `bars_3` belong to the battery bars patch, see [15.5](#155-settings-and-menu).
 
 | Key | Default | Range |
 |---|---|---|
@@ -1437,3 +1450,287 @@ Anything with `off:` → note it and stop (the patch refused; nothing was writte
   while asleep. Following it live would need MCU firmware changes, which are ruled out (2.5).
 - Mode 5 ignores the `0x28` brightness that ptm sets before sleep (50), so `bright blue` is at full
   brightness (13.10). For a dimmed LED use `dim blue` (mode 1 follows the brightness, 13.11).
+
+## 15. ptm battery bars patch (milestone 5)
+
+HOME Menu's battery icon is drawn from a level 0–5 that ptm computes from the MCU's integer % (mcu::RTC `0x2D`).
+On this battery the MCU % runs far ahead of the real charge (section 10), so the icon shows 1 red bar from MCU
+10 % with about **2.5 hours** left, and blinks from MCU 5 % with about **2.3 hours** left (15.8). This patch makes
+ptm hand out a level from the corrected % instead, using the same kind of verified byte patch as section 14.
+
+### 15.1 Finding
+
+Reverse engineered from the same dump as section 14 (New 3DS ptm `0004013020002202`, raw `.code`,
+VA = `0x100000` + file offset). ptm maps the MCU % to the level in **two identical code copies**:
+
+- **Copy A**, Thumb, `0x106f38`: reads the MCU % (`bl 0x1064b8`), clears bits 2–4 of the shared-page byte
+  `0x1FF81085` (`ands r2, #0xe3`, stored at once), computes the level and stores `level << 2` into it. Called at
+  init, from a periodic timer tick in ptm's event handler (`0x10069c`) and at the end of the wake callback. If the
+  MCU read fails it returns without touching the byte.
+- **Copy B**, Thumb, `0x104cc0`: the handler of **GetBatteryLevel** (ptm:u `0x0007`, shared by all ptm
+  services), computed on each request.
+- Stock mapping, both copies: **> 60 → 5, 31–60 → 4, 11–30 → 3, 6–10 → 2, 1–5 → 1, 0 → 0**. 3dbrew: 5 = 4 blue
+  bars, 4 = 3 bars, 3 = 2 bars, 2 = 1 red bar, 1 = 1 red bar blinking, 0 = shutdown.
+
+Each copy starts the mapping with `cmp rX, #60; bls <chain>; movs r1, #5; b <store>`:
+
+```
+copy A                                       copy B
+106f54  ands  r2, r0                         104cd0  bl    0x1064b8      ; read MCU %
+106f56  mov   r0, sp                         104cd4  mov   r1, sp
+106f58  strb  r2, [r4]                       104cd6  ldrb  r2, [r1]
+106f5a  ldrb  r0, [r0]                       104cd8  cmp   r2, #60       ; <- byte 8
+106f5c  cmp   r0, #60       ; <- byte 8      104cda  bls   0x104ce0      ; chain
+106f5e  bls   0x106f64      ; chain          104cdc  movs  r1, #5        ; <- byte 12
+106f60  movs  r1, #5        ; <- byte 12     104cde  b     0x104cea      ; strb r1, [r4]
+106f62  b     0x106f92      ; store << 2
+```
+
+| Window | VA | File offset | Bytes (byte 8 / byte 12 in brackets) | cmp byte VA | movs byte VA |
+|---|---|---|---|---|---|
+| A | `0x106f54` | `0x6f54` | `02 40 68 46 22 70 00 78 [3C] 28 01 D9 [05] 21 16 E0` | `0x106f5c` | `0x106f60` |
+| B | `0x104cd0` | `0x4cd0` | `01 F0 F2 FB 69 46 0A 78 [3C] 2A 01 D9 [05] 21 04 E0` | `0x104cd8` | `0x104cdc` |
+
+Each window occurs exactly once in the 61440-byte dump, with bytes 8 / 12 in their whitelists and also with both
+ignored altogether (host test, 15.8).
+
+The low-battery notifications (`0x211` / `0x212`) and the shutdown path don't use this level: they come from the
+MCU's own interrupts / %, so this patch doesn't change them (15.10).
+
+### 15.2 The patch
+
+Two bytes per window, the same two in both copies:
+
+- **Byte 8**, the `cmp` immediate: `3C` stock, `00` fed. With `cmp #0; bls chain`, % = 0 still goes down the
+  untouched chain and gives level 0 (shutdown semantics kept); any % > 0 executes `movs r1, #L`.
+- **Byte 12**, the `movs` immediate: L ∈ `01`..`05`, stock `05`.
+
+Every mix of old and new bytes gives a valid level in 0..5: with `cmp #60` and any L, % > 60 gives L and the
+rest the stock chain; with `cmp #0`, % > 0 gives L and 0 gives 0. Checked for both copies over % 0..255 ×
+{`3C`, `00`} × `01`..`05`, on a C model and on ptm's own instructions (15.8).
+
+**Write order** (each step is followed by a data cache clean + instruction cache invalidate, so it is in memory
+before the next one; every intermediate state is valid anyway):
+
+| Change | Steps |
+|---|---|
+| enable (stock → L) | movs = L (A and B), then cmp = `00` (A and B) |
+| change (L → L') | movs = L' only |
+| disable (L → stock) | cmp = `3C` first, then movs = `05` |
+
+After a completed apply both copies hold the same bytes (A8 = B8, A12 = B12) and exactly the wanted ones.
+Level 0 is **never** written.
+
+### 15.3 Behaviour
+
+`c` = the corrected % (`BatteryCurve_Corrected`, the same value the LED uses, 12.3).
+
+| Condition (first that applies) | Bytes | Level L | HOME Menu shows |
+|---|---|---|---|
+| setting `bars = 0` (stock) | `3C` / `05` | stock | ptm's own mapping |
+| no MCU reading yet, or the last 3 MCU reads failed | stock | stock | |
+| no curve | stock | stock | |
+| charger connected or charging (the LED's debounced `onCharger`, 13.3) | stock | stock | |
+| LED level **blinking** (c ≤ `blink_pct`, default 3) | `00` / `01` | 1 | blinking red bar |
+| LED level **red** (c ≤ `red_pct`, default 10) | `00` / `02` | 2 | 1 red bar |
+| c ≥ `bars_4` (default 70) | `00` / `05` | 5 | 4 bars |
+| c ≥ `bars_3` (default 40) | `00` / `04` | 4 | 3 bars |
+| else | `00` / `03` | 3 | 2 bars |
+
+- **Red / blink steps = the LED's level.** The decision reads `BatteryLedLogic.level`, so the red bar and the red
+  LED (and blinking bar / blinking LED) switch at the **same poll**, with the LED's rules: thresholds as
+  "c ≤ threshold" (so at exactly c = `red_pct` it is red, like the LED; the brief's "c ≥ red_pct → 2 bars" differs
+  only at that single value), "only gets worse" within one discharge, 0.5-point hysteresis after a settings change,
+  restart from the corrected % at the debounced unplug. To make this work with the LED override **off** too,
+  `BatteryLedLogic_Decide` now keeps the level state up to date whenever there is a curve (also with the override off
+  or in the error state); the LED's decision itself is unchanged (all LED tests unchanged and passing).
+- **3 / 4 / 5: 1 point of hysteresis.** Down as soon as c < threshold; up again only at c ≥ threshold + 1 (e.g.
+  4 → 3 at 39.9, back to 4 at 41.0). Not ratcheted: the corrected % above red hardly moves back up anyway.
+- From stock (boot, unplugged, setting switched on) the level is taken fresh, without hysteresis.
+- **Charging = stock.** The curve is for discharge, and 3dbrew notes the level is only reliable without external
+  power. After unplugging, the bars return to corrected after the LED's ~3 s debounce (3 decisions).
+- **MCU read errors**: one failed poll changes nothing; 3 in a row → stock until a read succeeds.
+
+**When it is applied** (only from the LED thread; `BatteryBars_Apply` maps nothing if the bytes are already right):
+
+- after every poll, when the decided level differs from the last one (polls: 10 s with the LED override off, 1 s
+  with it on, 250 ms near MCU events, 12.4);
+- at boot, right after the first good MCU read (forced, so Status shows the verification result even when stock);
+- after every settings change (`BatteryLed_SetConfig` sets a flag and kicks the thread, which applies at once);
+- every 30 s while the patch is in a retryable error (`no ptm`, `map error`, `write error`).
+
+Nothing after a shutdown signal (the bytes are gone at the next boot anyway), nothing from the notification hook.
+
+### 15.4 Verification and mechanism
+
+`BatteryBars_Apply(level)` in `battery_ptm_patch.c`, next to the section 14 code and sharing its process check:
+
+1. Values: `BatteryBars_BytesFor` gives only `3C` / `05` or `00` / `01`..`05`; both re-checked against the
+   whitelists; anything else → nothing happens.
+2. Off for this boot, or `state OK` with exactly these bytes → nothing (no mapping).
+3. `OpenProcessByName("ptm")`; not found → `off: no ptm` (retried).
+4. Title ID `0004013020002202` or `0004013000002202`, `.text` at `0x00100000` with a size covering `0x106f64`
+   (end of window A). Else `off: title id` / `off: layout` for the boot.
+5. `svcMapProcessMemoryEx(CUR_PROCESS_HANDLE, 0x0E810000, ptm, 0x104000, 0x3000, 0)`: the three pages
+   `0x104000`–`0x106fff` (window B on the first, window A on the third; all `.text`), read-write. **Scratch VA
+   `0x0E810000`–`0x0E812FFF`**, separate from section 14's `0x0E800000`–`0x0E800FFF` (a `_Static_assert` keeps them
+   apart). Failure → `map error` (retried).
+6. Read both windows. Each must equal its pattern except byte 8 ∈ {`3C`, `00`} and byte 12 ∈ {`01`..`05`}. If
+   either fails → `off: mismatch (A|B|A+B)` for the rest of the boot, nothing written. Never searched elsewhere.
+7. Write in the order of 15.2: `strb` at mapped `0x0E812F5C` / `0x0E812F60` (= ptm `0x106f5c` / `0x106f60`) and
+   `0x0E810CD8` / `0x0E810CDC` (= ptm `0x104cd8` / `0x104cdc`), each only if it differs; after each step
+   `svcFlushEntireDataCache()` + `svcInvalidateEntireInstructionCache()` (as section 14 / Rosalina's GDB stub).
+8. Read back both windows, verify again, and require A8 = B8 = cmp and A12 = B12 = movs; else `write error`
+   (retried).
+9. `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path.
+
+**Locking.** The bars patch has its own `LightLock` and state (`g_bars`), section 14 its own (`g_ptm`). Both are
+only called with the LED lock (`g_led.lock`) held, so in practice they are serialized; the separate scratch VAs mean
+the two mappings could not collide even without that. A failure of one never changes the other's state.
+
+### 15.5 Settings and menu
+
+`/luma/battery/config.ini` (12.6):
+
+| Key | Default | Range |
+|---|---|---|
+| `bars` | 1 | 1 corrected, 0 stock (any non-zero number = 1) |
+| `bars_4` | 70 | 4 bars at c ≥ `bars_4`; must be ≤ 100 and > `bars_3` |
+| `bars_3` | 40 | 3 bars at c ≥ `bars_3`; must be > `red_pct` |
+
+Sanitising: if `bars_4 > bars_3 > red_pct` and `bars_4 ≤ 100` doesn't hold, both fall back to the defaults 70 /
+40; if `red_pct` ≥ 40 (max 50) the default `bars_3` is invalid too, then `bars_3 = red_pct + 1` (and `bars_4` 70).
+Old `config.ini` files without the keys: defaults (bars **on**). The write buffer grew from 256 to 512 bytes.
+
+Menu:
+
+- New entry **Battery bars: corrected / stock** (after Sleep LED; the title shows the setting): toggles, saves,
+  explains the mapping with the current thresholds. Independent of the LED override, but needs a curve (shown in
+  red if there is none).
+- **Thresholds** got two rows: `4 bars from: 70 % corrected`, `3 bars from: 40 % corrected`. Left / Right keep
+  blink < red < 3 bars < 4 bars ≤ 100 (raising red stops below 3 bars).
+- **Rosalina menu footer** (`menu.c`, the temperature / voltage / % at the bottom right): with a curve it now also
+  shows the corrected %, e.g. `25°C 3.85V 72.4% c69.9%` (single spaces; right-aligned in a fixed 26-character field
+  so a shorter string clears the old one). Without a curve the upstream string is unchanged.
+
+### 15.6 Status line
+
+The Status screen has one more line, after `ptm patch:` (the half-line gap before the recorder lines was dropped
+to make room):
+
+```
+bars patch: fed L=3 (shared 3), writes 4
+bars patch: stock (charging), shared 5, writes 6       (also: off, no curve, no data, MCU err)
+bars patch: not checked yet, shared 5
+bars patch: off: mismatch (A)                           (also: (B), (A+B))
+bars patch: off: title id 00040130xxxx2202
+bars patch: off: no ptm 0x........  /  map error 0x........
+bars patch: write error (want L=3), writes N
+```
+
+`L` is the `movs` byte now in both copies; `shared` is `(*(vu8 *)0x1FF81085 >> 2) & 7`, read (only read) through
+libctru's `OS_SharedConfig->led_battery` in Rosalina's own mapping of the shared page. It is what HOME Menu sees and
+only changes at ptm's next tick (or wake), so `fed L=3 (shared 4)` for a while after a change is expected; it is the
+way to measure the tick latency on the device. `writes` counts byte writes this boot (enable = 4, change = 2).
+
+### 15.7 Safety argument
+
+- **Four bytes, in RAM, of one process**, each with a whitelist: `cmp` immediates `3C` / `00`, `movs` immediates
+  `01`..`05`. The instructions stay `cmp rX, #imm8` and `movs r1, #imm8`: no branch, register or code flow changes;
+  `0` is never written as a level. All 10 byte states (and every mix between copies or during a write) give a
+  level 0..5, and % = 0 gives 0 in all of them.
+- **Verified before every write, re-verified after it**; any mismatch turns this patch off for the boot; never
+  searched for elsewhere. Independent of section 14: one being off never disables the other.
+- **No new MCU write.** `BatteryMcu_SetPowerLedMode` is still the only one. Nothing on NAND / firmware / SD beyond
+  `config.ini`; gone at reboot.
+- Verified on the build (`arm-none-eabi-objdump -d rosalina.elf`):
+  - The only stores to foreign memory in the bars code are the two `strbne r1, [r0, r3]` in
+    `batteryBarsWriteStep` with `r3 = 0x0E812F54` (mapped window A) and `r3 = 0x0E810CD0` (mapped window B) and
+    `r0` = 8 or 12 (constants at its four call sites in `BatteryBars_Apply`), i.e. `0x0E812F5C`, `0x0E812F60`,
+    `0x0E810CD8`, `0x0E810CDC`; the value is the whitelisted cmp / movs byte. All other stores in
+    `BatteryBars_Apply` go to `g_bars` or the stack.
+  - Section 14 unchanged: `strbne r8, [r3, #40]` (`r3 = 0x0E800A00`) and `strb r6, [r3, #158]`
+    (`r3 = 0x0E800900`) in `BatteryPtmPatch_Apply`.
+  - `BatteryBars_Apply` is called only from `batteryLedBarsLocked` (only from `batteryLedThreadMain`);
+    `BatteryPtmPatch_Apply` only from `batteryLedPtmPatchLocked`; `BatteryMcu_SetPowerLedMode` only from
+    `batteryLedWriteLocked`; the `WriteRegister` header `0x00020082` appears in battery code only in
+    `BatteryMcu_SetPowerLedMode`.
+
+### 15.8 Code and host tests
+
+| File | Role |
+|---|---|
+| `include/battery/battery_ptm_bars.h` | addresses, windows, defaults, API (`_Static_assert`s for the mapping) |
+| `source/battery/battery_ptm_bars_logic.c` | pure: `BatteryBars_Decide`, `_BytesFor`, `_VerifyA` / `_VerifyB`, whitelists, names |
+| `source/battery/battery_ptm_patch.c` | Rosalina: `BatteryBars_Apply` (shared `batteryPtmCheckProcess` with section 14), status |
+| `source/battery/battery_led_logic.c` | config keys, sanitising; level state kept with the override off |
+| `source/battery/battery_led.c` | `batteryLedBarsLocked()` after each poll, at boot, after settings changes; MCU error streak |
+| `source/battery/battery_menu.c`, `source/menu.c` | Battery bars entry, Thresholds rows, Status line; footer corrected % |
+| `tests/battery/bars_host_test.c`, `tests/battery/led_host_test.c` | host tests |
+
+`tests/battery/run_host_test.sh` now also builds and runs `bars_host_test` (with `PTM_CODE`):
+
+- **Decision**: 121320 cases (c 0..101 in 0.1 steps × 5 threshold sets × setting × curve × charging × MCU error /
+  no data) against an independent statement of the table; never 0 when fed; the LED level overrides c for red /
+  blink; the 1-point hysteresis (down at once, up at +1, no flapping when c wobbles around 40); through
+  `BatteryLedLogic_Decide` like `battery_led.c`, with the override on **and off**: red / blink bars at the same poll
+  as the LED's red / blinking, exactly 4 one-step changes per discharge, stock while charging, the unplug debounce,
+  setting off / on, no curve.
+- **Model** of both ptm functions for % 0..255 × cmp {`3C`, `00`} × movs `01`..`05` and every step of the three
+  write orders: always 0..5, % 0 → 0, stock bytes → stock mapping, fed → L. With the dump, a small Thumb interpreter
+  runs ptm's **own** instructions from the `cmp` to the store with the patched immediates: agrees with the model in
+  2560 / 2560 cases, and gives the stock mapping with stock bytes.
+- **Verification**: bytes 8 and 12 of both windows over all 256 values; all 2 × 10 × 14 × 255 = 71400 single-byte
+  changes at the other 14 positions rejected; windows not interchangeable.
+- **Dump**: both windows in place and stock, the surrounding instructions as assumed (function starts,
+  `movs r1, #1`, `movs r5, #0`, the stores, the `0x1FF81085` literal), each window exactly once (whitelists and
+  bytes 8 / 12 ignored), also after patching a copy.
+- **config.ini**: parsing (`bars`, `bars_4`, `bars_3`, old files), sanitising (15 cases plus an exhaustive sweep).
+- `led_host_test` replay now also prints the HOME Menu level per session and checks red / blink bars = red /
+  blinking LED at every sample and 4 changes per discharge.
+
+Replay (curve from 0001 + 0002, defaults), corrected bars vs. stock:
+
+| Session | Level | corrected bars: time left | stock (MCU %) bars: time left |
+|---|---|---|---|
+| 0001 (7 h 28 min) | 3 bars (4) | 5:11 (c 69.98) | 4:29 (MCU 61.0) |
+| | 2 bars (3) | 2:57 (c 39.55) | 3:07 (MCU 30.3) |
+| | 1 red bar (2) | **0:44** (c 9.97) | **2:31** (MCU 10.9) |
+| | blinking (1) | **0:14** (c 2.97) | **2:20** (MCU 5.95) |
+| 0002 (7 h 12 min) | 3 bars (4) | 5:05 | 4:23 |
+| | 2 bars (3) | 2:53 | 3:03 |
+| | 1 red bar (2) | **0:43** | **2:27** |
+| | blinking (1) | **0:13** | **2:17** |
+
+Last run: `PASS` (with sessions 0001 + 0002 and the dump).
+
+### 15.9 On-device test plan
+
+Curve built, LED override on (for step 2), Battery bars `corrected` (default). Note the `bars patch:` line and the
+corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off:` → note it and stop.
+
+1. **HOME Menu bars vs. corrected %.** At several levels (e.g. c ≈ 80, 55, 30): Status `fed L=5 / 4 / 3`, and after
+   `shared` has caught up, HOME Menu shows 4 / 3 / 2 bars. Optionally lower `bars_4` / `bars_3` in Thresholds to
+   see a change without waiting.
+2. **Red bar with the red LED.** Raise `red_pct` above c (or wait for a real red level): the LED goes red and Status
+   shows `fed L=2` at the same time; HOME Menu then shows 1 red bar. Same for blinking with `blink_pct` above c
+   (`L=1`, blinking bar). Lower the thresholds again: back with the LED's 0.5-point hysteresis.
+3. **Charging → stock.** Plug in: `stock (charging)` within a poll, HOME Menu back to ptm's own level (and its
+   charging icon). Unplug: back to `fed` after ~3 s.
+4. **Setting off → stock.** Menu `Battery bars` → `stock`: `stock (off)`, `shared` back to the stock level after the
+   next tick; on again → `fed`.
+5. **Tick latency.** After a change (e.g. step 1 with a threshold edit), time how long Status shows
+   `fed L=x (shared y)` with x ≠ y, and when HOME Menu's icon changes. Also check after a sleep / wake (copy A runs
+   at the end of the wake callback).
+
+### 15.10 Known limitations
+
+- **System low-battery warnings still come from the MCU.** The "battery low" / "very low" notifications
+  (`0x212` / `0x211`) and the shutdown path don't use this level: they fire around **MCU 10 % / 5 %**, which on this
+  battery is about **33 % / 31 % real** (15.8: c 33.9 / 31.5). Apps / HOME Menu reacting to them are unaffected.
+- **The shared-page byte only updates at ptm's tick** (and at init / wake). HOME Menu is expected to read that byte
+  (not verified; it may also call GetBatteryLevel), so the icon may lag the patch by up to one tick (to be measured, 15.9 step 5). GetBatteryLevel (copy B) answers at once.
+- **Apps that read the MCU directly** (mcu::HWC, e.g. Rosalina's footer MCU %, homebrew) still see the MCU %.
+- **Stock while charging**: the icon is ptm's own then, including its view of the charge level.
+- **At MCU 0 %** both copies still give level 0 (shutdown semantics), whatever the corrected % says.
+- The patch only knows the New 3DS ptm version analysed here; any other binary → `off: mismatch`, stock bars.
