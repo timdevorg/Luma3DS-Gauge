@@ -104,6 +104,168 @@ static u8 decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, float correcte
     return BatteryLedLogic_Decide(l, cfg, &in, NULL);
 }
 
+// The sleep hook (batteryLedSleepLocked): Decide with the lid closed, then BatteryLedLogic_SleepWrite
+static u8 sleepWrite(BatteryLedLogic *l, const BatteryLedConfig *cfg, float corrected, u8 lastWritten, bool entering)
+{
+    u8 reason;
+    BatteryLedInputs in = inputs(corrected);
+    in.shellClosed = true;
+    in.lastWritten = lastWritten;
+    u8 desired = BatteryLedLogic_Decide(l, cfg, &in, &reason);
+    return BatteryLedLogic_SleepWrite(desired, reason, l->level, lastWritten, entering);
+}
+
+// Sleep LED setting (sleep_mode): which mode, if any, the sleep hook writes for each setting and level
+static void sleepSettingTests(void)
+{
+    static const u8 settings[] = { BATTERY_LED_MODE_BLUE, BATTERY_LED_MODE_BLUE_FORCED, BATTERY_LED_MODE_SLEEP, BATTERY_LED_SLEEP_SYSTEM };
+    BatteryLedConfig cfg;
+    BatteryLedLogic l;
+    BatteryLedConfig_Defaults(&cfg);
+    cfg.override = true;
+
+    for (u32 i = 0; i < sizeof(settings); i++)
+    {
+        u8 set = settings[i];
+        u8 expBlue = set == BATTERY_LED_SLEEP_SYSTEM ? BATTERY_LED_MODE_KEEP : set;
+        cfg.sleepMode = set;
+        for (u32 b = 0; b < 2; b++)
+        {
+            cfg.blueMode = b ? BATTERY_LED_MODE_BLUE_FORCED : BATTERY_LED_MODE_BLUE;
+            u8 blue = cfg.blueMode;
+
+            // Blue level: the setting, written on entry even if it equals the last written mode
+            BatteryLedLogic_Init(&l);
+            CHECK(decide(&l, &cfg, 50.0f) == blue);
+            CHECK(BatteryLedLogic_SleepModeForLevel(&cfg, BATTERY_LED_LEVEL_BLUE) == expBlue);
+            CHECK(sleepWrite(&l, &cfg, 50.0f, blue, true) == expBlue);
+            // Second signal of the same sleep (0x101 after 0x214): only if it isn't there yet
+            CHECK(sleepWrite(&l, &cfg, 50.0f, set == BATTERY_LED_SLEEP_SYSTEM ? blue : set, false) == BATTERY_LED_MODE_KEEP);
+            if (set != BATTERY_LED_SLEEP_SYSTEM && set != blue)
+                CHECK(sleepWrite(&l, &cfg, 50.0f, blue, false) == set);
+            // Wake: back to the blue mode
+            CHECK(decide(&l, &cfg, 50.0f) == blue);
+
+            // Red / blinking red: unchanged, nothing written (they stay), whatever the setting
+            BatteryLedLogic_Init(&l);
+            CHECK(decide(&l, &cfg, 9.0f) == BATTERY_LED_MODE_RED);
+            CHECK(BatteryLedLogic_SleepModeForLevel(&cfg, BATTERY_LED_LEVEL_RED) == BATTERY_LED_MODE_RED);
+            CHECK(sleepWrite(&l, &cfg, 9.0f, BATTERY_LED_MODE_RED, true) == BATTERY_LED_MODE_KEEP);
+            CHECK(sleepWrite(&l, &cfg, 30.0f, BATTERY_LED_MODE_RED, true) == BATTERY_LED_MODE_KEEP); // only worse: no blue
+            CHECK(sleepWrite(&l, &cfg, 2.0f, BATTERY_LED_MODE_RED, true) == BATTERY_LED_MODE_BLINK); // got worse
+            CHECK(BatteryLedLogic_SleepModeForLevel(&cfg, BATTERY_LED_LEVEL_BLINK) == BATTERY_LED_MODE_BLINK);
+            CHECK(sleepWrite(&l, &cfg, 2.0f, BATTERY_LED_MODE_BLINK, true) == BATTERY_LED_MODE_KEEP);
+            CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLINK); // wake: still blinking
+
+            // Nothing written this boot / last write automatic: nothing on sleep
+            BatteryLedLogic_Init(&l);
+            CHECK(sleepWrite(&l, &cfg, 50.0f, BATTERY_LED_MODE_UNKNOWN, true) == BATTERY_LED_MODE_KEEP);
+            CHECK(sleepWrite(&l, &cfg, 50.0f, BATTERY_LED_MODE_AUTO, true) == BATTERY_LED_MODE_KEEP);
+        }
+        cfg.blueMode = BATTERY_LED_MODE_BLUE;
+
+        // Override off / no curve / error / shutdown: the setting never writes anything
+        BatteryLedInputs in;
+        u8 reason;
+        BatteryLedLogic_Init(&l);
+        in = inputs(50.0f);
+        in.shellClosed = true;
+        in.override = false;
+        in.lastWritten = BATTERY_LED_MODE_UNKNOWN;
+        u8 d = BatteryLedLogic_Decide(&l, &cfg, &in, &reason);
+        CHECK(BatteryLedLogic_SleepWrite(d, reason, l.level, in.lastWritten, true) == BATTERY_LED_MODE_KEEP);
+        in = inputs(-1.0f);
+        in.shellClosed = true;
+        in.lastWritten = BATTERY_LED_MODE_UNKNOWN;
+        d = BatteryLedLogic_Decide(&l, &cfg, &in, &reason);
+        CHECK(BatteryLedLogic_SleepWrite(d, reason, l.level, in.lastWritten, true) == BATTERY_LED_MODE_KEEP);
+        in = inputs(50.0f);
+        in.shellClosed = true;
+        in.shuttingDown = true;
+        d = BatteryLedLogic_Decide(&l, &cfg, &in, &reason);
+        CHECK(BatteryLedLogic_SleepWrite(d, reason, l.level, in.lastWritten, true) == BATTERY_LED_MODE_KEEP);
+        // Override switched off while blue (thread hasn't handed back yet): automatic, never forced by the entry rule
+        in = inputs(50.0f);
+        in.shellClosed = true;
+        in.override = false;
+        d = BatteryLedLogic_Decide(&l, &cfg, &in, &reason);
+        CHECK(d == BATTERY_LED_MODE_AUTO && BatteryLedLogic_SleepWrite(d, reason, l.level, BATTERY_LED_MODE_AUTO, true) == BATTERY_LED_MODE_KEEP);
+
+        // Mismatch watch: system (KEEP) and the animation are not watched while closed; 5 / 1 are
+        BatteryLedWatch w;
+        BatteryLedObserved o = { true, 1, 0, true, 2 };
+        BatteryLedWatch_Init(&w);
+        if (expBlue != BATTERY_LED_MODE_KEEP)
+            BatteryLedWatch_Written(&w, expBlue, 0);
+        CHECK(BatteryLedWatch_Mismatch(&w, expBlue, &o, 5000) == (expBlue == BATTERY_LED_MODE_BLUE || expBlue == BATTERY_LED_MODE_BLUE_FORCED));
+    }
+
+    // Full sequence through the write path (default setting 5): lid close writes 5 again, wake resumes, all
+    // writes whitelisted, the shutdown latch still allows exactly one "power off"
+    {
+        FakeLed f;
+        fakeInit(&f);
+        BatteryLedConfig_Defaults(&cfg);
+        cfg.override = true;
+        BatteryLedLogic_Init(&l);
+        fakeApply(&f, decide(&l, &cfg, 50.0f));
+        CHECK(f.lastWritten == BATTERY_LED_MODE_BLUE && f.writes == 1);
+        u8 m = sleepWrite(&l, &cfg, 50.0f, f.lastWritten, true);                   // 0x214
+        CHECK(m == BATTERY_LED_MODE_BLUE && fakeWrite(&f, m) && f.writes == 2);
+        CHECK(sleepWrite(&l, &cfg, 50.0f, f.lastWritten, false) == BATTERY_LED_MODE_KEEP); // 0x101
+        fakeApply(&f, decide(&l, &cfg, 50.0f));                                       // wake
+        CHECK(f.writes == 2 && f.lastWritten == BATTERY_LED_MODE_BLUE);
+        cfg.sleepMode = BATTERY_LED_SLEEP_SYSTEM;
+        CHECK(sleepWrite(&l, &cfg, 50.0f, f.lastWritten, true) == BATTERY_LED_MODE_KEEP);
+        f.reg29 = BATTERY_LED_MODE_BLUE;
+        fakeShutdown(&f);
+        CHECK(f.powerOffWrites == 1 && f.writes == 3);
+        cfg.sleepMode = BATTERY_LED_MODE_BLUE;
+        CHECK(sleepWrite(&l, &cfg, 50.0f, BATTERY_LED_MODE_BLUE, true) == BATTERY_LED_MODE_BLUE && !fakeWrite(&f, BATTERY_LED_MODE_BLUE));
+    }
+
+    // Menu cycle and names
+    CHECK(BatteryLedLogic_NextSleepSetting(5) == 1 && BatteryLedLogic_NextSleepSetting(1) == 2 &&
+          BatteryLedLogic_NextSleepSetting(2) == BATTERY_LED_SLEEP_SYSTEM && BatteryLedLogic_NextSleepSetting(0) == 5 &&
+          BatteryLedLogic_NextSleepSetting(7) == 5);
+    CHECK(strcmp(BatteryLedLogic_SleepSettingName(0), "system") == 0 && strcmp(BatteryLedLogic_SleepSettingName(5), "blue(5)") == 0);
+    // An invalid setting that bypassed Sanitize never reaches the MCU
+    cfg.sleepMode = 3;
+    CHECK(BatteryLedLogic_SleepModeForLevel(&cfg, BATTERY_LED_LEVEL_BLUE) == BATTERY_LED_MODE_KEEP);
+
+    // config.ini: sleep_mode
+    static const struct { const char *text; u8 expect; } parse[] = {
+        { "sleep_mode=5\n", 5 }, { "sleep_mode=1\n", 1 }, { "sleep_mode=2\n", 2 }, { "sleep_mode=0\n", 0 },
+        { "sleep_mode=system\n", 0 }, { "sleep_mode=system\r\n", 0 }, { "sleep_mode=system", 0 },
+        { "sleep_mode=3\n", 5 }, { "sleep_mode=4\n", 5 }, { "sleep_mode=6\n", 5 }, { "sleep_mode=7\n", 5 },
+        { "sleep_mode=255\n", 5 }, { "sleep_mode=99999\n", 5 }, { "sleep_mode=-1\n", 5 }, { "sleep_mode=x\n", 5 },
+        { "sleep_mode=systemx\n", 5 }, { "sleep_mode=\n", 5 }, { "#sleep_mode=1\n", 5 }, { "sleep_modes=1\n", 5 },
+        { "led_override=1\n", 5 }, { "", 5 },
+    };
+    for (u32 i = 0; i < sizeof(parse) / sizeof(parse[0]); i++)
+    {
+        BatteryLedConfig c;
+        BatteryLedConfig_Defaults(&c);
+        BatteryLedConfig_Parse(parse[i].text, &c);
+        BatteryLedConfig_Sanitize(&c);
+        if (c.sleepMode != parse[i].expect)
+            printf("  sleep_mode parse case %lu (\"%s\"): got %u\n", (unsigned long)i, parse[i].text, c.sleepMode);
+        CHECK(c.sleepMode == parse[i].expect);
+    }
+    {
+        // Other keys unaffected; sleep_mode in a full file as written by BatteryLed_SetConfig
+        BatteryLedConfig c;
+        BatteryLedConfig_Defaults(&c);
+        CHECK(BatteryLedConfig_Parse("# Battery Manager settings\nled_override=1\nred_pct=12\nblink_pct=4\nblue_mode=1\n"
+                                     "# sleep_mode: 5 blue on/red off, 1 forced blue, 2 MCU sleep animation, 0 system (write nothing)\n"
+                                     "sleep_mode=0\n", &c));
+        BatteryLedConfig_Sanitize(&c);
+        CHECK(c.override && c.redPct == 12 && c.blinkPct == 4 && c.blueMode == 1 && c.sleepMode == BATTERY_LED_SLEEP_SYSTEM);
+        BatteryLedConfig_Defaults(&c);
+        CHECK(BatteryLedConfig_Parse("sleep_mode=system\n", &c));
+    }
+}
+
 static void unitTests(void)
 {
     BatteryLedConfig cfg;
@@ -112,7 +274,7 @@ static void unitTests(void)
     u8 reason;
 
     BatteryLedConfig_Defaults(&cfg);
-    CHECK(!cfg.override && cfg.redPct == 10 && cfg.blinkPct == 3 && cfg.blueMode == 5);
+    CHECK(!cfg.override && cfg.redPct == 10 && cfg.blinkPct == 3 && cfg.blueMode == 5 && cfg.sleepMode == 5);
 
     // Thresholds (corrected <= X: red, <= Y: blink)
     BatteryLedLogic_Init(&l);
@@ -211,7 +373,9 @@ static void unitTests(void)
     CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLUE_FORCED);
     cfg.blueMode = BATTERY_LED_MODE_BLUE;
 
-    // Sleep (lid closed / sleep requested): blue -> sleep animation (2), red / blinking red kept, never automatic
+    // Sleep (lid closed / sleep requested) with sleep_mode=2 (the milestone 4b behaviour):
+    // blue -> sleep animation (2), red / blinking red kept, never automatic
+    cfg.sleepMode = BATTERY_LED_MODE_SLEEP;
     BatteryLedLogic_Init(&l);
     CHECK(decide(&l, &cfg, 50.0f) == BATTERY_LED_MODE_BLUE);
     CHECK(decideShell(&l, &cfg, 50.0f, BATTERY_LED_MODE_BLUE, &reason) == BATTERY_LED_MODE_SLEEP && reason == BATTERY_LED_REASON_SHELL);
@@ -269,6 +433,9 @@ static void unitTests(void)
         fakeApply(&f, BatteryLedLogic_Decide(&l, &cfg, &in, NULL));
         CHECK(f.lastWritten == BATTERY_LED_MODE_BLUE && f.writes == 3);
     }
+    cfg.sleepMode = BATTERY_LED_DEFAULT_SLEEP_MODE;
+
+    sleepSettingTests();
 
     // Shutdown latch: "power off" exactly once at the first signal, nothing afterwards
     {
