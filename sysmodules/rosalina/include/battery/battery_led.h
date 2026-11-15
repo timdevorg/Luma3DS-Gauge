@@ -51,6 +51,10 @@ typedef struct BatteryLedStatus
     u64 sdReadyMs;          //   LED thread created / SD usable / first MCU read / first write (0 = not yet)
     u64 firstDataMs;
     u64 firstWriteMs;
+    u32 sleepCount;         // sleep diagnostics: sleep entries this boot
+    u8 sleepWrote;          //   mode written at the last sleep entry, BATTERY_LED_MODE_UNKNOWN = nothing
+    u8 wakeRead;            //   0x29 read on wake before any write, BATTERY_LED_MODE_UNKNOWN = read failed
+    bool wakePending;       //   still asleep / lid closed: no wake read yet
 } BatteryLedStatus;
 
 /// Creates the LED thread (call once from the recorder's creation, before the service manager runs).
@@ -58,8 +62,8 @@ MyThread *BatteryLed_CreateThread(void);
 
 /// Rosalina notification hook (main.c): shell open/close (0x213/0x214), sleep (0x101/0x102/0x106),
 /// battery low (0x211/0x212), shutdown (0x108) and pre-termination (0x2000). Runs in the
-/// notification thread; synchronously writes the sleep animation before sleep (if the LED is blue and
-/// ours) and "power off" once at the first shutdown signal (if the LED is ours), then nothing more.
+/// notification thread; synchronously writes the Sleep LED setting before sleep (if the LED is blue and
+/// ours; nothing for "system") and "power off" once at the first shutdown signal (if the LED is ours), then nothing more.
 void BatteryLed_HandleNotification(u32 notificationId);
 
 void BatteryLed_GetStatus(BatteryLedStatus *out);

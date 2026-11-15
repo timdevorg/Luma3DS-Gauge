@@ -38,12 +38,19 @@
 #define BATTERY_LED_DEFAULT_BLUE_MODE   BATTERY_LED_MODE_BLUE
 #define BATTERY_LED_MAX_RED_PCT         50
 
+// Sleep LED setting (config.ini sleep_mode): what is written when the lid closes / sleep is requested while
+// the level is blue. 1, 2, 5 are written as is; BATTERY_LED_SLEEP_SYSTEM (stored as 0, or the word "system")
+// writes nothing and leaves the LED to the system / MCU. 0 is never written as "automatic" here.
+#define BATTERY_LED_SLEEP_SYSTEM        0
+#define BATTERY_LED_DEFAULT_SLEEP_MODE  BATTERY_LED_MODE_BLUE
+
 typedef struct BatteryLedConfig
 {
     bool override;  // LED control on (default off)
     u8 redPct;      // solid red at corrected <= redPct (1..50)
     u8 blinkPct;    // blinking red at corrected <= blinkPct (0..redPct-1)
     u8 blueMode;    // BATTERY_LED_MODE_BLUE (5) or BATTERY_LED_MODE_BLUE_FORCED (1)
+    u8 sleepMode;   // blue level at sleep: 5 (default), 1, 2 (sleep animation) or BATTERY_LED_SLEEP_SYSTEM (0)
 } BatteryLedConfig;
 
 typedef enum BatteryLedLevel
@@ -138,10 +145,11 @@ typedef struct BatteryLedSmoother
 
 void BatteryLedConfig_Defaults(BatteryLedConfig *cfg);
 /// Parses config.ini ("key=value" lines, '#' comments; keys led_override, red_pct, blink_pct,
-/// blue_mode; unknown keys ignored). Only keys present are changed. Returns true if any key was found.
+/// blue_mode, sleep_mode (a number, or "system" = 0); unknown keys ignored). Only keys present are changed. Returns true if any key was found.
 /// Call BatteryLedConfig_Sanitize afterwards.
 bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg);
-/// Clamps the values to the allowed ranges (blink < red, blue mode 1 or 5).
+/// Clamps the values to the allowed ranges (blink < red, blue mode 1 or 5, sleep mode 5 / 1 / 2 / system,
+/// anything else -> the default 5).
 void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg);
 
 void BatteryLedLogic_Init(BatteryLedLogic *l);
@@ -152,8 +160,18 @@ void BatteryLedLogic_Reevaluate(BatteryLedLogic *l);
 u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in, u8 *outReason);
 /// Mode for a level.
 u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level);
-/// Mode while the lid is closed / sleeping: blue -> sleep animation (2), red / blinking red kept (4 / 6).
-u8 BatteryLedLogic_SleepModeForLevel(u8 level);
+/// Mode while the lid is closed / sleeping: blue -> cfg->sleepMode (5 / 1 / 2, or KEEP for "system"),
+/// red / blinking red kept (4 / 6).
+u8 BatteryLedLogic_SleepModeForLevel(const BatteryLedConfig *cfg, u8 level);
+/// What the sleep hook writes (BATTERY_LED_MODE_KEEP = nothing). desired / reason from Decide with the lid
+/// closed. entering: the first sleep signal of this sleep (0x214 or 0x101): at the blue level the configured
+/// sleep mode is written even if it equals the last written mode. Otherwise only when NeedsWrite says so
+/// (red / blinking red: normally nothing, they stay).
+u8 BatteryLedLogic_SleepWrite(u8 desired, u8 reason, u8 level, u8 lastWritten, bool entering);
+/// Name of a sleep_mode setting for the menu ("blue(5)", "blue(1)", "anim(2)", "system").
+const char *BatteryLedLogic_SleepSettingName(u8 sleepMode);
+/// Next value in the menu cycle 5 -> 1 -> 2 -> system -> 5.
+u8 BatteryLedLogic_NextSleepSetting(u8 sleepMode);
 /// True if lastWritten is a mode we put on the LED (not automatic, nothing yet, or "power off").
 bool BatteryLedLogic_OwnsLed(u8 lastWritten);
 /// Whether a desired mode has to be written now (KEEP: never; automatic: only to undo our own write;

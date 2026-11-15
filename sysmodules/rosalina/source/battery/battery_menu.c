@@ -32,6 +32,7 @@ Menu batteryMenu = {
         { "Build curve", METHOD, .method = &BatteryMenu_BuildCurve },
         { "Show graph", METHOD, .method = &BatteryMenu_ShowGraph },
         { "LED override: OFF", METHOD, .method = &BatteryMenu_LedOverride },
+        { "Sleep LED: blue(5)", METHOD, .method = &BatteryMenu_SleepLed },
         { "Thresholds", METHOD, .method = &BatteryMenu_Thresholds },
         { "LED test", METHOD, .method = &BatteryMenu_LedTest },
         {},
@@ -39,10 +40,35 @@ Menu batteryMenu = {
 };
 
 #define BATTERY_MENU_LED_OVERRIDE_ITEM  6
+#define BATTERY_MENU_SLEEP_LED_ITEM     7
 
 void BatteryMenu_UpdateLedTitle(bool on)
 {
     batteryMenu.items[BATTERY_MENU_LED_OVERRIDE_ITEM].title = on ? "LED override: ON" : "LED override: OFF";
+}
+
+void BatteryMenu_UpdateSleepLedTitle(u8 sleepMode)
+{
+    const char *title;
+    switch (sleepMode)
+    {
+        case BATTERY_LED_MODE_BLUE_FORCED:  title = "Sleep LED: blue(1)"; break;
+        case BATTERY_LED_MODE_SLEEP:        title = "Sleep LED: anim(2)"; break;
+        case BATTERY_LED_SLEEP_SYSTEM:      title = "Sleep LED: system"; break;
+        default:                            title = "Sleep LED: blue(5)"; break;
+    }
+    batteryMenu.items[BATTERY_MENU_SLEEP_LED_ITEM].title = title;
+}
+
+// "5", "none", "?" or "-" for the Sleep diagnostics line
+static void batteryFormatSleepMode(char *out, u8 mode, bool pending, bool isWrite)
+{
+    if (pending)
+        memcpy(out, "-", 2);
+    else if (mode == BATTERY_LED_MODE_UNKNOWN)
+        memcpy(out, isWrite ? "none" : "?", isWrite ? 5 : 2);
+    else
+        sprintf(out, "%lu", (u32)mode);
 }
 
 static void batteryMenuClear(void)
@@ -174,6 +200,16 @@ void BatteryMenu_Status(void)
         }
         else
             y = batteryMenuLine(y, COLOR_WHITE, "Reasserts:      %lu boot/%lu session", led.reasserts, sessionReasserts);
+        if (led.sleepCount != 0)
+        {
+            // What the sleep hook wrote, and 0x29 read on wake before anything was written
+            char w[8], r[8];
+            batteryFormatSleepMode(w, led.sleepWrote, false, true);
+            batteryFormatSleepMode(r, led.wakeRead, led.wakePending, false);
+            y = batteryMenuLine(y, COLOR_WHITE, "Sleep: wrote %s / wake read %s (n=%lu)", w, r, led.sleepCount);
+        }
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "Sleep: setting %s, no sleep yet", BatteryLedLogic_SleepSettingName(led.cfg.sleepMode));
         if (led.error == BATTERY_LED_ERR_WRITE_FAILED)
             y = batteryMenuLine(y, COLOR_RED, "LED: writes failed (0x%08lx), automatic", (u32)led.lastWriteRes);
         else if (led.error == BATTERY_LED_ERR_MCU_OVERRIDES)
@@ -748,7 +784,7 @@ void BatteryMenu_LedOverride(void)
             y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: solid red", (u32)cfg.redPct);
             y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: blinking red", (u32)cfg.blinkPct);
             y = batteryMenuLine(y, COLOR_WHITE, "Charging: only gets better. Lid closed:");
-            y = batteryMenuLine(y, COLOR_WHITE, "sleep animation if blue. Power off: mode 3.");
+            y = batteryMenuLine(y, COLOR_WHITE, "Sleep LED %s if blue. Power off: mode 3.", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
             if (!haveCurve)
             {
                 y += SPACING_Y;
@@ -763,6 +799,46 @@ void BatteryMenu_LedOverride(void)
             y = batteryMenuLine(y, COLOR_WHITE, "The power LED is back to automatic");
             y = batteryMenuLine(y, COLOR_WHITE, "(the MCU decides).");
         }
+        if (R_FAILED(res))
+        {
+            y += SPACING_Y;
+            batteryMenuLine(y, COLOR_RED, "Could not save config.ini (0x%08lx).", (u32)res);
+        }
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
+        Draw_FlushFramebuffer();
+        Draw_Unlock();
+    }
+    while (!(waitInput() & KEY_B) && !menuShouldExit);
+}
+
+void BatteryMenu_SleepLed(void)
+{
+    BatteryLedConfig cfg;
+    BatteryLed_EnsureConfigLoaded();
+    BatteryLed_GetConfig(&cfg);
+    cfg.sleepMode = BatteryLedLogic_NextSleepSetting(cfg.sleepMode);
+    Result res = BatteryLed_SetConfig(&cfg);
+    BatteryMenu_UpdateSleepLedTitle(cfg.sleepMode);
+
+    batteryMenuClear();
+    do
+    {
+        Draw_Lock();
+        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Sleep LED");
+        u32 y = 30;
+        y = batteryMenuLine(y, COLOR_GREEN, "Sleep LED is now: %s", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
+        y += SPACING_Y;
+        y = batteryMenuLine(y, COLOR_WHITE, "Written when the lid closes while the LED");
+        y = batteryMenuLine(y, COLOR_WHITE, "is blue (override on). Red / blinking red");
+        y = batteryMenuLine(y, COLOR_WHITE, "stay as they are.");
+        y += SPACING_Y;
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "blue(5): blue on, red off (default)");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "blue(1): forced default blue");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_SLEEP ? COLOR_GREEN : COLOR_WHITE, "anim(2): MCU sleep animation (may be red)");
+        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "system:  write nothing, MCU decides");
+        y += SPACING_Y;
+        y = batteryMenuLine(y, COLOR_WHITE, "Select this entry again for the next one.");
+        y = batteryMenuLine(y, COLOR_WHITE, "Status shows the \"Sleep:\" result.");
         if (R_FAILED(res))
         {
             y += SPACING_Y;

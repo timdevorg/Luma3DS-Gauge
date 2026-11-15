@@ -12,8 +12,9 @@
 *     It writes only when the desired mode changes, or to re-apply it after a mismatch
 *     (at most once per 250 ms).
 *   - Keeps controlling while the adapter is plugged in (MCU table only, the level only gets better).
-*   - Lid closed / sleep requested: writes the sleep animation (2) if the LED is blue, keeps red /
-*     blinking red; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
+*   - Lid closed / sleep requested: writes the Sleep LED setting (default 5; 1, 2, or nothing for
+*     "system") if the LED is blue, keeps red / blinking red; remembers what it wrote and reads 0x29
+*     back on wake (before anything is written) for the Status screen; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
 *     Both from the notification thread, synchronously (BatteryLed_HandleNotification, main.c).
 *   - Boot: starts as soon as the SD card can be opened (config.ini, curve.bin) and mcu::HWC answers,
 *     checking every 200 ms instead of waiting a fixed time.
@@ -81,6 +82,12 @@ static struct
     bool testMode;
     bool prevCharger;       // adapter / charging on the previous poll (voltage median reset on unplug)
     BatteryLedGate gate;    // shutdown latch
+
+    // Sleep diagnostics (read-only): what the sleep hook wrote, 0x29 read on wake before any write
+    u32 sleepCount;         // sleep entries (lid closed / sleep requested) this boot
+    u8 sleepWrote;          // mode written at the last sleep entry, BATTERY_LED_MODE_UNKNOWN = nothing
+    u8 wakeRead;            // 0x29 on wake, BATTERY_LED_MODE_UNKNOWN = read failed
+    bool wakePending;       // asleep / lid closed: wakeRead not taken yet
 
     u64 startMs, sdReadyMs, firstDataMs, firstWriteMs; // boot timing (ms since the tick counter started)
 
@@ -151,15 +158,26 @@ static u8 batteryLedDecideLocked(void)
 }
 
 // Lid closed / sleep requested (notification thread): apply the sleep mode now, before the system goes on.
-// Blue -> sleep animation (2); red / blinking red stay; nothing if we haven't written anything this boot.
-static void batteryLedSleepLocked(u64 nowMs)
+// Blue -> the Sleep LED setting (5 / 1 / 2, nothing for "system"); red / blinking red stay; nothing if we
+// haven't written anything this boot. entering: first sleep signal of this sleep (counted for diagnostics).
+static void batteryLedSleepLocked(u64 nowMs, bool entering)
 {
-    if (g_led.testMode || !g_led.haveData)
+    if (g_led.testMode)
         return; // the test screen closes on lid close; the thread applies the mode after it
 
+    if (entering)
+    {
+        g_led.sleepCount++;
+        g_led.sleepWrote = BATTERY_LED_MODE_UNKNOWN;
+        g_led.wakePending = true;
+    }
+    if (!g_led.haveData)
+        return;
+
     u8 desired = batteryLedDecideLocked();
-    if (BatteryLedLogic_NeedsWrite(desired, g_led.watch.lastWritten))
-        batteryLedWriteLocked(desired, nowMs); // not rate limited: this is the last chance before sleep
+    u8 mode = BatteryLedLogic_SleepWrite(desired, g_led.reason, g_led.logic.level, g_led.watch.lastWritten, entering);
+    if (mode != BATTERY_LED_MODE_KEEP && batteryLedWriteLocked(mode, nowMs)) // not rate limited: last chance before sleep
+        g_led.sleepWrote = mode;
 }
 
 // First shutdown signal (0x108, 0x2000 or thread exit): "power off" (3) once if we own the LED and the system
@@ -207,6 +225,15 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
         g_led.shellOpenPolls = 0;
 
     u8 desired = batteryLedDecideLocked();
+
+    // Sleep diagnostics: the first fresh poll that is no longer "lid closed" records the 0x29 read-back of
+    // this poll's sample, taken before this function writes anything after wake
+    if (fresh && g_led.wakePending && g_led.reason != BATTERY_LED_REASON_SHELL)
+    {
+        g_led.wakeRead = g_led.obs.modeValid ? g_led.obs.mode : BATTERY_LED_MODE_UNKNOWN;
+        g_led.wakePending = false;
+    }
+
     if (!fresh || desired == BATTERY_LED_MODE_KEEP)
         return; // the MCU read failed (don't act on old data), or nothing to write (shutdown, lid closed)
 
@@ -357,6 +384,7 @@ void BatteryLed_EnsureConfigLoaded(void)
         BatteryLedLogic_Reevaluate(&g_led.logic);
         LightLock_Unlock(&g_led.lock);
         BatteryMenu_UpdateLedTitle(cfg.override);
+        BatteryMenu_UpdateSleepLedTitle(cfg.sleepMode);
     }
     LightLock_Unlock(&g_cfgFileLock);
 }
@@ -396,8 +424,10 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         "led_override=%lu\n"
         "red_pct=%lu\n"
         "blink_pct=%lu\n"
-        "blue_mode=%lu\n",
-        (u32)(cfg.override ? 1 : 0), (u32)cfg.redPct, (u32)cfg.blinkPct, (u32)cfg.blueMode);
+        "blue_mode=%lu\n"
+        "# sleep_mode: 5 blue on/red off, 1 forced blue, 2 MCU sleep animation, 0 system (write nothing)\n"
+        "sleep_mode=%lu\n",
+        (u32)(cfg.override ? 1 : 0), (u32)cfg.redPct, (u32)cfg.blinkPct, (u32)cfg.blueMode, (u32)cfg.sleepMode);
     Result res = BatteryFs_WriteSafely(BATTERY_CONFIG_PATH, BATTERY_CONFIG_TMP_PATH, g_cfgBuf, (u32)n);
     LightLock_Unlock(&g_cfgFileLock);
     return res;
@@ -432,6 +462,10 @@ void BatteryLed_GetStatus(BatteryLedStatus *out)
     out->sdReadyMs = g_led.sdReadyMs;
     out->firstDataMs = g_led.firstDataMs;
     out->firstWriteMs = g_led.firstWriteMs;
+    out->sleepCount = g_led.sleepCount;
+    out->sleepWrote = g_led.sleepWrote;
+    out->wakeRead = g_led.wakeRead;
+    out->wakePending = g_led.wakePending;
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -475,6 +509,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
     u64 nowMs = batteryLedNowMs();
 
     LightLock_Lock(&g_led.lock);
+    bool wasSleeping = g_led.shellClosed || g_led.sleepPending;
     switch (notificationId)
     {
         case NOTIF_SHELL_CLOSED:
@@ -513,7 +548,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
 
     // Synchronous, before the system goes on with sleep
     if (sleep)
-        batteryLedSleepLocked(nowMs);
+        batteryLedSleepLocked(nowMs, !wasSleeping);
     LightLock_Unlock(&g_led.lock);
 
     if (kick)
@@ -574,6 +609,8 @@ MyThread *BatteryLed_CreateThread(void)
     g_led.desired = BATTERY_LED_MODE_AUTO;
     g_led.reason = BATTERY_LED_REASON_NO_DATA;
     g_led.corrected = -1.0f;
+    g_led.sleepWrote = BATTERY_LED_MODE_UNKNOWN;
+    g_led.wakeRead = BATTERY_LED_MODE_UNKNOWN;
 
     if (R_FAILED(svcCreateEvent(&g_ledKick, RESET_ONESHOT)))
         svcBreak(USERBREAK_PANIC);
