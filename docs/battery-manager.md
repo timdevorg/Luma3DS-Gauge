@@ -663,7 +663,7 @@ Updated by section 13 (charging, lid, shutdown):
 |---|---|
 | override off, no curve, control error | automatic (0), once, and only if we had written something else |
 | adapter / charging | as below, from the MCU-table corrected %, level only gets better (13.3) |
-| lid closed or sleep requested | blue → 2 (sleep animation); red / blinking kept; nothing if nothing written this boot (13.2) |
+| lid closed or sleep requested | blue → Sleep LED setting (default 5; 1, 2, or nothing for `system`, 12.11); red / blinking kept; nothing if nothing written this boot (13.2, 13.9) |
 | shutdown | 3 ("power off") once if we own the LED, then nothing (13.5) |
 | corrected > red threshold (default 10 %) | `blue_mode` (default 5, or 1) |
 | blink threshold (default 3 %) < corrected ≤ red threshold | 4 (solid red) |
@@ -749,6 +749,8 @@ led_override=0
 red_pct=10
 blink_pct=3
 blue_mode=5
+# sleep_mode: 5 blue on/red off, 1 forced blue, 2 MCU sleep animation, 0 system (write nothing)
+sleep_mode=5
 ```
 
 | Key | Default | Range |
@@ -757,6 +759,7 @@ blue_mode=5
 | `red_pct` | 10 | 1–50 |
 | `blink_pct` | 3 | 0 to `red_pct` − 1 |
 | `blue_mode` | 5 | 5 (red off, blue on) or 1 (forced default blue) |
+| `sleep_mode` | 5 | 5, 1, 2 or 0 / `system` (12.11); anything else (3, 4, 6, 7, 255, `-1`, text) = 5 |
 
 Missing file or keys = defaults (so the override is **off** after the first install). Written by the
 menu only, safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
@@ -766,6 +769,8 @@ menu entry needs it.
 ### 12.7 Menu
 
 - **LED override: ON/OFF** (title shows the state): toggles and saves, shows what it means.
+- **Sleep LED: blue(5) / blue(1) / anim(2) / system** (title shows the setting): each selection moves to
+  the next value (5 → 1 → 2 → system → 5), saves `config.ini` and shows what it means (12.11).
 - **Thresholds**: Up/Down select, Left/Right change: solid red X %, blinking Y % (Y < X enforced), blue
   mode 5 / 1. B saves (only if changed).
 - **LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
@@ -773,7 +778,8 @@ menu entry needs it.
   screen is open and is restored on exit.
 - **Status**: corrected % (the LED's input, with the median voltage), override state + reason
   (`active`, `override off`, `no curve`, `charger`, `lid closed`, …, `fast poll`), desired and read-back
-  mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last one), errors.
+  mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last one), the
+  `Sleep:` diagnostics line (12.11), errors.
 
 ### 12.8 Host tests
 
@@ -833,6 +839,48 @@ Superseded by [13.8](#138-on-device-checklist); results of this first run in 13.
 10. Later in the session: solid red at corrected ≤ 10 %, blinking at ≤ 3 %, never back to blue.
 11. Afterwards: check `led_desired`, `led_actual`, `reasserts` in the CSV, and that the Sessions list
     and Build curve still read it (CSV v2).
+
+### 12.11 Sleep LED setting (`sleep_mode`)
+
+What the sleep hook writes when the lid closes (`0x214`) or sleep is requested (`0x101`) while the
+override is on and the level is **blue**:
+
+| `sleep_mode` | Menu | Written at sleep (blue level) |
+|---|---|---|
+| `5` (default) | `blue(5)` | 5: blue on, red off |
+| `1` | `blue(1)` | 1: forced default blue |
+| `2` | `anim(2)` | 2: the MCU's sleep animation (the milestone 4b behaviour; red when the MCU thinks the battery is low, 13.9) |
+| `0` or the word `system` | `system` | nothing: the LED is left to the system / MCU. `0` here never means "write automatic"; the menu saves it as `0` |
+
+- Missing key, a missing file, or an invalid value: 5.
+- At the **first** sleep signal of a sleep the configured mode is written even if the LED should already
+  show it (5 after 5), so the MCU has been told exactly that value right before sleep. A second signal of
+  the same sleep (`0x101` after `0x214`) writes only if the mode isn't there yet.
+- Unchanged: red / blinking red are kept (no write); nothing at all with the override off, no curve, the
+  error state, during shutdown, or if nothing was written this boot; shutdown latch, hysteresis and the
+  "only gets worse" rule. The write goes through `batteryLedWriteLocked` → `BatteryMcu_SetPowerLedMode`
+  like every other (whitelist, gate). While closed, 5 / 1 are watched for mismatches as when open
+  (re-asserted if the MCU shows red); `system` and 2 are not watched.
+- Code: `BatteryLedLogic_SleepModeForLevel(cfg, level)` and `BatteryLedLogic_SleepWrite()` in
+  `battery_led_logic.c` (host-tested); `batteryLedSleepLocked()` in `battery_led.c`.
+
+**Diagnostics (read-only).** Status shows
+
+```
+Sleep: wrote 5 / wake read 5 (n=3)
+```
+
+- `wrote`: the mode the sleep hook wrote at the last sleep entry, or `none` (setting `system`, red /
+  blinking kept, override off, ...).
+- `wake read`: `0x29` as read by the LED thread's first poll after wake that is no longer "lid closed"
+  (from that poll's sample, i.e. before anything is written after wake); `-` while still closed / asleep,
+  `?` if the read failed.
+- `n`: sleep entries this boot (first of `0x214` / `0x101` per sleep).
+- Before the first sleep: `Sleep: setting blue(5), no sleep yet`.
+
+No extra MCU access: the wake value comes from the normal poll's `0x29` read. Not logged in the session
+CSV (a marker line would need changes to the v1 / v2 parsers; a session with a sleep is invalid for the
+curve anyway).
 
 ## 13. On-device results and refinements (milestone 4b)
 
@@ -974,10 +1022,32 @@ session, same times as in 12.8).
    like: fade, off?). Note the `0x29` read-back. Then 0 and leave the screen.
 2. Override on: Status `active`, blue; note the `Boot s:` line after a cold boot (expected 1st LED
    ~1–2 s after Rosalina).
-3. **Lid** close → sleep animation (blue level) instead of red blinking; open → blue within ~1 s.
+3. **Lid** close → the Sleep LED setting (13.9, default solid blue) instead of red blinking; open → blue
+   within ~1 s.
 4. **Charger** plugged in → stays blue (Status `charging`); with a red level it may turn blue once the
    MCU-table corrected % is 0.5 above the threshold; never worse. Unplug → normal discharge logic.
 5. **Boot** (cold, override on): red blinking only until shortly after Rosalina starts.
 6. **Power off** from HOME → the normal power-off animation, **no** red flashing after it.
 7. **Reboot** (Rosalina menu → Reboot) → LED back to normal on the next boot.
 8. Later: run `tests/battery/run_host_test.sh` with the session CSVs in `sessions/`.
+
+### 13.9 Lid closed at a blue level pulses red (sleep animation)
+
+Second on-device run, override on, corrected level **blue**: closing the lid wrote mode 2 (13.2) and the
+power LED **blinked / pulsed red**. The LED test screen with mode 2 showed the red LED toggling and blue
+intensity 0. So the MCU's sleep animation uses the red LED when the MCU itself thinks the battery is low
+(it did, at MCU ~3 %), just like its automatic mode. A second possibility, not excluded yet: ptm writes
+`0x29` itself after our hook during sleep entry.
+
+Change: the mode written at sleep is now the Sleep LED setting, default **5** (12.11). The `Sleep:` line
+on the Status screen shows what was written and what `0x29` reads on wake, which tells the two
+explanations apart: if we write 5 and wake reads 5 but the LED was red, the MCU ignores the mode during
+sleep; if wake reads something else, someone (ptm / MCU) changed it.
+
+**Test plan** (override on, corrected level blue; ideally at a low MCU % where the stock LED would be red):
+
+1. Menu: **Sleep LED** until it shows `blue(5)` (the default). Close the lid for about **1 minute**, note
+   the LED colour (solid blue? red? pulsing? off?). Open, then Status: note the `Sleep:` line.
+2. Same with **`blue(1)`**.
+3. Same with **`system`** (nothing written; expected: whatever the MCU does, probably red).
+4. Report for each: setting, LED colour while closed, `Sleep: wrote X / wake read Y (n=N)`.
