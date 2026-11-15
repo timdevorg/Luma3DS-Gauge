@@ -184,6 +184,24 @@ u8 BatteryLedLogic_SleepWrite(u8 desired, u8 reason, u8 level, u8 lastWritten, b
 const char *BatteryLedLogic_SleepSettingName(u8 sleepMode);
 /// Next value in the menu cycle 5 -> 1 -> 2 -> system -> 5.
 u8 BatteryLedLogic_NextSleepSetting(u8 sleepMode);
+/// Rows of the menu's settings editors (Settings, Advanced > Blue LED type): the field Left / Right change.
+typedef enum BatterySetting
+{
+    BATTERY_SETTING_POWER_LED = 0,  // override: corrected (on) / stock (off)
+    BATTERY_SETTING_SLEEP_LED,      // sleepMode: dim (1) -> bright (5) -> stock (0) -> dim
+    BATTERY_SETTING_BARS,           // bars: corrected / stock
+    BATTERY_SETTING_RED,            // redPct: blinkPct < redPct < bars3Pct, redPct <= BATTERY_LED_MAX_RED_PCT
+    BATTERY_SETTING_BLINK,          // blinkPct: 0 <= blinkPct < redPct
+    BATTERY_SETTING_BARS4,          // bars4Pct: bars3Pct < bars4Pct <= BATTERY_BARS_MAX_PCT
+    BATTERY_SETTING_BARS3,          // bars3Pct: redPct < bars3Pct < bars4Pct
+    BATTERY_SETTING_BLUE_MODE,      // blueMode: 5 <-> 1
+    BATTERY_SETTING_COUNT,
+} BatterySetting;
+
+/// One Left (dir < 0) or Right (dir > 0) step of a setting. Choices wrap around; percentages move by 1 and stop
+/// at their limits (blink < red < bars_3 < bars_4 <= 100, red <= 50), so a sanitized config stays sanitized
+/// (BatteryLedConfig_Sanitize leaves it unchanged). Returns true if the value changed.
+bool BatteryLedConfig_Step(BatteryLedConfig *cfg, u8 setting, s32 dir);
 /// True if lastWritten is a mode we put on the LED (not automatic, nothing yet, or "power off").
 bool BatteryLedLogic_OwnsLed(u8 lastWritten);
 /// Whether a desired mode has to be written now (KEEP: never; automatic: only to undo our own write;

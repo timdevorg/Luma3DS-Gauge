@@ -45,7 +45,6 @@
 #include "battery/battery_curve.h"
 #include "battery/battery_recorder.h"
 #include "battery/battery_led.h"
-#include "battery/battery_menu.h"
 #include "battery/battery_ptm_patch.h"
 #include "battery/battery_ptm_bars.h"
 
@@ -487,9 +486,6 @@ void BatteryLed_EnsureConfigLoaded(void)
         g_led.configLoaded = true;
         BatteryLedLogic_Reevaluate(&g_led.logic);
         LightLock_Unlock(&g_led.lock);
-        BatteryMenu_UpdateLedTitle(cfg.override);
-        BatteryMenu_UpdateSleepLedTitle(cfg.sleepMode);
-        BatteryMenu_UpdateBarsTitle(cfg.bars);
     }
     LightLock_Unlock(&g_cfgFileLock);
 }

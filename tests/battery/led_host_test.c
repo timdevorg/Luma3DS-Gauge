@@ -7,7 +7,8 @@
 *   1. Unit tests: thresholds, hysteresis, "only gets worse", charging ("only gets better", unplug,
 *      full), threshold edits, sleep (sleep animation / red kept), wake, shutdown latch ("power off"
 *      once, nothing after), whitelist, mismatch detection, voltage median, config parsing, sleep transition
-*      (no re-assert between sleep entry and wake, ptm sleep / wake bytes, charging at sleep entry).
+*      (no re-assert between sleep entry and wake, ptm sleep / wake bytes, charging at sleep entry), and the
+*      menu's settings editor steps (BatteryLedConfig_Step: cycling, limits, always sanitized).
 *   2. Replay: feeds recorded sessions (CSV v1 or v2) through the same code path the LED thread
 *      uses (voltage median sampled every 10 s, BatteryCurve_CorrectedFrom, BatteryLedLogic_Decide)
 *      with the override on and default settings, and prints when the LED changes.
@@ -1036,9 +1037,93 @@ static void replay(const char *path)
     CHECK(barChanges == 4);
 }
 
+static bool cfgEqual(const BatteryLedConfig *a, const BatteryLedConfig *b)
+{
+    return a->override == b->override && a->redPct == b->redPct && a->blinkPct == b->blinkPct && a->blueMode == b->blueMode &&
+           a->sleepMode == b->sleepMode && a->bars == b->bars && a->bars4Pct == b->bars4Pct && a->bars3Pct == b->bars3Pct;
+}
+
+// Steps a setting until it stops changing (at most 200 steps), returns the value the getter reads
+static u32 stepToLimit(BatteryLedConfig *cfg, u8 setting, s32 dir, u8 *field)
+{
+    for (u32 i = 0; i < 200 && BatteryLedConfig_Step(cfg, setting, dir); i++)
+        ;
+    return *field;
+}
+
+// Settings editor (menu): Left / Right cycling and limits (BatteryLedConfig_Step)
+static void settingsStepTests(void)
+{
+    BatteryLedConfig cfg, before;
+    BatteryLedConfig_Defaults(&cfg);
+
+    // Choices wrap around in both directions
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_POWER_LED, 1) && cfg.override);
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_POWER_LED, -1) && !cfg.override);
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_BARS, -1) && !cfg.bars);
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_BARS, 1) && cfg.bars);
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_BLUE_MODE, 1) && cfg.blueMode == BATTERY_LED_MODE_BLUE_FORCED);
+    CHECK(BatteryLedConfig_Step(&cfg, BATTERY_SETTING_BLUE_MODE, -1) && cfg.blueMode == BATTERY_LED_MODE_BLUE);
+    // Sleep LED: Right dim -> bright -> stock -> dim, Left the other way
+    CHECK(cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, 1);
+    CHECK(cfg.sleepMode == BATTERY_LED_MODE_BLUE);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, 1);
+    CHECK(cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, 1);
+    CHECK(cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, -1);
+    CHECK(cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, -1);
+    CHECK(cfg.sleepMode == BATTERY_LED_MODE_BLUE);
+    BatteryLedConfig_Step(&cfg, BATTERY_SETTING_SLEEP_LED, -1);
+    CHECK(cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED);
+    // No change: direction 0, unknown row
+    before = cfg;
+    CHECK(!BatteryLedConfig_Step(&cfg, BATTERY_SETTING_RED, 0) && !BatteryLedConfig_Step(&cfg, BATTERY_SETTING_COUNT, 1) &&
+          cfgEqual(&cfg, &before));
+
+    // Percentages stop at their limits (defaults red 10, blink 3, bars 70 / 40)
+    BatteryLedConfig_Defaults(&cfg);
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_RED, 1, &cfg.redPct) == 39);        // below bars_3 (40)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_RED, -1, &cfg.redPct) == 4);        // above blink (3)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BLINK, 1, &cfg.blinkPct) == 3);     // below red (4)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BLINK, -1, &cfg.blinkPct) == 0);
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS4, 1, &cfg.bars4Pct) == 100);
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS4, -1, &cfg.bars4Pct) == 41);   // above bars_3 (40)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS3, 1, &cfg.bars3Pct) == 40);    // below bars_4 (41)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS3, -1, &cfg.bars3Pct) == 5);    // above red (4)
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS4, 1, &cfg.bars4Pct) == 100);
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BARS3, 1, &cfg.bars3Pct) == 99);
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_RED, 1, &cfg.redPct) == BATTERY_LED_MAX_RED_PCT); // 50, bars_3 is 99
+    CHECK(stepToLimit(&cfg, BATTERY_SETTING_BLINK, 1, &cfg.blinkPct) == BATTERY_LED_MAX_RED_PCT - 1);
+    CHECK(!BatteryLedConfig_Step(&cfg, BATTERY_SETTING_RED, -1) && cfg.redPct == 50); // blink 49 blocks it
+
+    // Random walk over all rows: every step keeps the config sanitized (Sanitize changes nothing)
+    BatteryLedConfig_Defaults(&cfg);
+    u32 seed = 12345, changes = 0;
+    for (u32 i = 0; i < 20000; i++)
+    {
+        seed = seed * 1103515245u + 12345u;
+        u8 row = (u8)((seed >> 16) % BATTERY_SETTING_COUNT);
+        s32 dir = (seed >> 8) & 1 ? 1 : -1;
+        changes += BatteryLedConfig_Step(&cfg, row, dir) ? 1 : 0;
+        before = cfg;
+        BatteryLedConfig_Sanitize(&cfg);
+        if (!cfgEqual(&cfg, &before))
+        {
+            CHECK(cfgEqual(&cfg, &before));
+            break;
+        }
+    }
+    CHECK(changes > 10000);
+    printf("settings editor: cycling, limits and 20000-step random walk OK\n");
+}
+
 int main(int argc, char **argv)
 {
     unitTests();
+    settingsStepTests();
 
     if (argc < 2)
     {

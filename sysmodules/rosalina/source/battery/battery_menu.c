@@ -2,7 +2,8 @@
 *   This file is part of Luma3DS-Gauge, an unofficial fork of Luma3DS.
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
-*   Battery Manager: Rosalina submenu (Status, recording, sessions, curve, graph, LED control).
+*   Battery Manager: Rosalina submenu (settings, learning: recording / sessions / curve / graph, advanced: diagnostics,
+*   LED test, blue LED type, limits). Settings only go through BatteryLed_SetConfig; nothing here writes to the MCU or ptm.
 */
 
 #include <3ds.h>
@@ -25,49 +26,57 @@
 #define BATTERY_MENU_LINE_CHARS     49 // (320 - 2 * 10) / 6 - 1
 #define BATTERY_MENU_LIST_ROWS      15
 
-Menu batteryMenu = {
-    "Battery Manager",
+// Menu tree (docs/battery-manager.md, section 4.2). Settings are edited on one screen and saved when it is left, so no
+// item title depends on config.ini. The only dynamic title is Start / Stop recording, refreshed by its visibility callback
+// (menuDraw calls it on every redraw, about once a second) into a static buffer padded to a fixed length, because the
+// menu redraws without clearing.
+
+static void batteryMenuSettings(void);
+static void batteryMenuRecording(void);
+static void batteryMenuSessions(void);
+static void batteryMenuBuildCurve(void);
+static void batteryMenuGraph(void);
+static void batteryMenuDiagnostics(void);
+static void batteryMenuLedTest(void);
+static void batteryMenuBlueLedType(void);
+static void batteryMenuAbout(void);
+static bool batteryRecordingTitleRefresh(void);
+
+#define BATTERY_RECORDING_TITLE_CHARS   34 // "Stop recording  #9999  1193:02:47" (u32 ms) fits
+
+static char g_recordingTitle[BATTERY_RECORDING_TITLE_CHARS + 1] = "Start recording";
+
+static Menu batteryLearningMenu = {
+    "Battery Manager - Learning",
     {
-        { "Status", METHOD, .method = &BatteryMenu_Status },
-        { "Start recording", METHOD, .method = &BatteryMenu_StartRecording },
-        { "Stop recording", METHOD, .method = &BatteryMenu_StopRecording },
-        { "Sessions", METHOD, .method = &BatteryMenu_Sessions },
-        { "Build curve", METHOD, .method = &BatteryMenu_BuildCurve },
-        { "Show graph", METHOD, .method = &BatteryMenu_ShowGraph },
-        { "LED override: OFF", METHOD, .method = &BatteryMenu_LedOverride },
-        { "Sleep LED: dim blue", METHOD, .method = &BatteryMenu_SleepLed },
-        { "Battery bars: corrected", METHOD, .method = &BatteryMenu_Bars },
-        { "Thresholds", METHOD, .method = &BatteryMenu_Thresholds },
-        { "LED test", METHOD, .method = &BatteryMenu_LedTest },
+        { g_recordingTitle, METHOD, .method = &batteryMenuRecording, .visibility = &batteryRecordingTitleRefresh },
+        { "Sessions", METHOD, .method = &batteryMenuSessions },
+        { "Build curve", METHOD, .method = &batteryMenuBuildCurve },
+        { "Curve graph", METHOD, .method = &batteryMenuGraph },
         {},
     }
 };
 
-#define BATTERY_MENU_LED_OVERRIDE_ITEM  6
-#define BATTERY_MENU_SLEEP_LED_ITEM     7
-#define BATTERY_MENU_BARS_ITEM          8
-
-void BatteryMenu_UpdateLedTitle(bool on)
-{
-    batteryMenu.items[BATTERY_MENU_LED_OVERRIDE_ITEM].title = on ? "LED override: ON" : "LED override: OFF";
-}
-
-void BatteryMenu_UpdateSleepLedTitle(u8 sleepMode)
-{
-    const char *title;
-    switch (sleepMode)
+static Menu batteryAdvancedMenu = {
+    "Battery Manager - Advanced",
     {
-        case BATTERY_LED_MODE_BLUE:         title = "Sleep LED: bright blue"; break;
-        case BATTERY_LED_SLEEP_SYSTEM:      title = "Sleep LED: off (stock)"; break;
-        default:                            title = "Sleep LED: dim blue"; break;
+        { "Diagnostics", METHOD, .method = &batteryMenuDiagnostics },
+        { "LED test", METHOD, .method = &batteryMenuLedTest },
+        { "Blue LED type", METHOD, .method = &batteryMenuBlueLedType },
+        { "Limits and about", METHOD, .method = &batteryMenuAbout },
+        {},
     }
-    batteryMenu.items[BATTERY_MENU_SLEEP_LED_ITEM].title = title;
-}
+};
 
-void BatteryMenu_UpdateBarsTitle(bool corrected)
-{
-    batteryMenu.items[BATTERY_MENU_BARS_ITEM].title = corrected ? "Battery bars: corrected" : "Battery bars: stock";
-}
+Menu batteryMenu = {
+    "Battery Manager",
+    {
+        { "Settings", METHOD, .method = &batteryMenuSettings },
+        { "Learning...", MENU, .menu = &batteryLearningMenu },
+        { "Advanced...", MENU, .menu = &batteryAdvancedMenu },
+        {},
+    }
+};
 
 // "5", "none", "?" or "-" for the Sleep diagnostics line
 static void batteryFormatSleepMode(char *out, u8 mode, bool pending, bool isWrite)
@@ -134,7 +143,8 @@ static void batteryFormatX10(char *out, float v)
     sprintf(out, "%lu.%lu", x10 / 10, x10 % 10);
 }
 
-void BatteryMenu_Status(void)
+// Advanced > Diagnostics: raw gauge, LED, ptm patch and recorder values, refreshed every second
+static void batteryMenuDiagnostics(void)
 {
     batteryMenuClear();
 
@@ -154,7 +164,7 @@ void BatteryMenu_Status(void)
         BatteryBars_GetStatus(&bars);
 
         Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Status");
+        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Diagnostics");
         u32 y = 30;
 
         if (R_SUCCEEDED(res))
@@ -327,7 +337,29 @@ void BatteryMenu_Status(void)
     while (!(waitInputWithTimeout(1000) & KEY_B) && !menuShouldExit);
 }
 
-void BatteryMenu_StartRecording(void)
+// ---- Recording ----
+
+static bool batteryRecordingTitleRefresh(void)
+{
+    BatteryRecorderStatus st;
+    char title[48];
+    BatteryRecorder_GetStatus(&st);
+    if (st.recording)
+    {
+        char dur[16];
+        batteryFormatDuration(dur, st.elapsedMs);
+        sprintf(title, "Stop recording  #%04lu  %s", (u32)st.number, dur);
+    }
+    else
+        memcpy(title, "Start recording", 16);
+    title[BATTERY_RECORDING_TITLE_CHARS] = 0;
+    u32 len = strlen(title);
+    memset(title + len, ' ', BATTERY_RECORDING_TITLE_CHARS - len); // fixed length: no residue from a longer title
+    memcpy(g_recordingTitle, title, sizeof(g_recordingTitle));
+    return true; // always visible
+}
+
+static void batteryStartRecording(void)
 {
     char line[64];
     u16 number = 0;
@@ -352,7 +384,7 @@ void BatteryMenu_StartRecording(void)
     }
 }
 
-void BatteryMenu_StopRecording(void)
+static void batteryStopRecording(void)
 {
     char line[64];
     u16 number = 0;
@@ -365,6 +397,17 @@ void BatteryMenu_StopRecording(void)
     }
     else
         batteryMenuMessage("Battery Manager - Stop recording", BatteryRecorder_ErrorString(err), NULL);
+}
+
+// Learning > Start recording / Stop recording #NNNN (one entry, the title shows which)
+static void batteryMenuRecording(void)
+{
+    BatteryRecorderStatus st;
+    BatteryRecorder_GetStatus(&st);
+    if (st.recording)
+        batteryStopRecording();
+    else
+        batteryStartRecording();
 }
 
 // ---- Sessions ----
@@ -467,7 +510,7 @@ static bool batterySessionDelete(const BatterySessionInfo *info)
     return true;
 }
 
-void BatteryMenu_Sessions(void)
+static void batteryMenuSessions(void)
 {
     u32 selected = 0; // index in display order (newest first)
     u32 scroll = 0;
@@ -695,7 +738,7 @@ static void batteryBuildRun(void)
     batteryBuildResult(ok, &r);
 }
 
-void BatteryMenu_BuildCurve(void)
+static void batteryMenuBuildCurve(void)
 {
     u32 selected = 0, scroll = 0;
     bool dirty = false;
@@ -787,9 +830,9 @@ void BatteryMenu_BuildCurve(void)
         BatteryCurve_SelectionSave();
 }
 
-// ---- Show graph ----
+// ---- Curve graph ----
 
-void BatteryMenu_ShowGraph(void)
+static void batteryMenuGraph(void)
 {
     bool zoom = false;
     const BatteryCurveFile *curve = BatteryCurve_Snapshot();
@@ -823,188 +866,174 @@ void BatteryMenu_ShowGraph(void)
     batteryMenuClear();
 }
 
-// ---- LED control ----
+// ---- Settings ----
 
-void BatteryMenu_LedOverride(void)
+#define BATTERY_SETTING_LABEL_CHARS 18
+#define BATTERY_SETTING_HELP_LINES  6
+
+static const char *batterySettingLabel(u8 setting)
 {
-    BatteryLedConfig cfg;
-    BatteryLed_EnsureConfigLoaded();
-    BatteryLed_GetConfig(&cfg);
-    cfg.override = !cfg.override;
-    Result res = BatteryLed_SetConfig(&cfg);
-    BatteryMenu_UpdateLedTitle(cfg.override);
-    bool haveCurve = BatteryCurve_IsLoaded();
-
-    batteryMenuClear();
-    do
+    switch (setting)
     {
-        Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - LED override");
-        u32 y = 30;
-        if (cfg.override)
-        {
-            y = batteryMenuLine(y, COLOR_GREEN, "LED override is now ON.");
-            y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "Corrected battery above %lu %%: blue", (u32)cfg.redPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "%lu %% or less: solid red", (u32)cfg.redPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "%lu %% or less: blinking red", (u32)cfg.blinkPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Always blue while charging.");
-            y = batteryMenuLine(y, COLOR_WHITE, "Lid closed: Sleep LED setting (%s).", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
-            if (!haveCurve)
+        case BATTERY_SETTING_POWER_LED: return "Power LED";
+        case BATTERY_SETTING_SLEEP_LED: return "Sleep LED";
+        case BATTERY_SETTING_BARS:      return "HOME Menu bars";
+        case BATTERY_SETTING_RED:       return "Red LED at";
+        case BATTERY_SETTING_BLINK:     return "Blinking red at";
+        case BATTERY_SETTING_BARS4:     return "4 bars from";
+        case BATTERY_SETTING_BARS3:     return "3 bars from";
+        case BATTERY_SETTING_BLUE_MODE: return "Blue LED type";
+        default:                        return "?";
+    }
+}
+
+// Value column of a row (at most 22 chars)
+static void batterySettingValue(char *out, u8 setting, const BatteryLedConfig *cfg)
+{
+    switch (setting)
+    {
+        case BATTERY_SETTING_POWER_LED:
+            memcpy(out, cfg->override ? "corrected" : "stock", cfg->override ? 10 : 6);
+            break;
+        case BATTERY_SETTING_SLEEP_LED:
+            sprintf(out, "%s%s", cfg->sleepMode == BATTERY_LED_MODE_BLUE ? "bright blue" :
+                                 cfg->sleepMode == BATTERY_LED_SLEEP_SYSTEM ? "stock" : "dim blue",
+                    cfg->override ? "" : " (inactive)");
+            break;
+        case BATTERY_SETTING_BARS:
+            memcpy(out, cfg->bars ? "corrected" : "stock", cfg->bars ? 10 : 6);
+            break;
+        case BATTERY_SETTING_RED:   sprintf(out, "%3lu %%", (u32)cfg->redPct); break;
+        case BATTERY_SETTING_BLINK: sprintf(out, "%3lu %%", (u32)cfg->blinkPct); break;
+        case BATTERY_SETTING_BARS4: sprintf(out, "%3lu %%", (u32)cfg->bars4Pct); break;
+        case BATTERY_SETTING_BARS3: sprintf(out, "%3lu %%", (u32)cfg->bars3Pct); break;
+        case BATTERY_SETTING_BLUE_MODE:
+            sprintf(out, "%s", cfg->blueMode == BATTERY_LED_MODE_BLUE_FORCED ? "forced blue (1)" : "red off, blue on (5)");
+            break;
+        default:
+            out[0] = 0;
+            break;
+    }
+}
+
+// Help text of the selected row: always BATTERY_SETTING_HELP_LINES lines (blank-padded, so a shorter text clears a longer
+// one). Each line fits 49 chars with the largest values (red 50, blink 49, bars 100 / 99). Draw_Lock must be held.
+static u32 batterySettingHelp(u32 y, u8 setting, const BatteryLedConfig *cfg)
+{
+    u32 red = cfg->redPct, blink = cfg->blinkPct, n = 0;
+
+#define HELP(color, ...) do { y = batteryMenuLine(y, color, __VA_ARGS__); n++; } while (0)
+    switch (setting)
+    {
+        case BATTERY_SETTING_POWER_LED:
+            HELP(COLOR_WHITE, "corrected: the power LED follows the corrected");
+            HELP(COLOR_WHITE, "battery %%: blue above %lu %%, solid red at %lu %%", red, red);
+            HELP(COLOR_WHITE, "and below, blinking red at %lu %% and below.", blink);
+            HELP(COLOR_WHITE, "Always blue while charging.");
+            HELP(COLOR_WHITE, "stock: the console's own LED (it turns red far");
+            HELP(COLOR_WHITE, "too early with this battery).");
+            break;
+        case BATTERY_SETTING_SLEEP_LED:
+            HELP(COLOR_WHITE, "Lid closed (sleep): dim or bright blue while the");
+            HELP(COLOR_WHITE, "battery is above the red level or charging,");
+            HELP(COLOR_WHITE, "steady red at the red level, the console's own");
+            HELP(COLOR_WHITE, "warning at the blinking level.");
+            HELP(COLOR_WHITE, "stock: the console's own sleep light.");
+            HELP(cfg->override ? COLOR_WHITE : COLOR_RED, "Needs Power LED: corrected.");
+            break;
+        case BATTERY_SETTING_BARS:
+            HELP(COLOR_WHITE, "HOME Menu battery icon from the corrected %%:");
+            HELP(COLOR_WHITE, "4 bars from %lu %%, 3 bars from %lu %%, 2 bars", (u32)cfg->bars4Pct, (u32)cfg->bars3Pct);
+            HELP(COLOR_WHITE, "above %lu %%, 1 red bar at %lu %%, blinking at %lu %%.", red, red, blink);
+            HELP(COLOR_WHITE, "Held while charging. Changes show within about");
+            HELP(COLOR_WHITE, "8 s. Works without Power LED: corrected, but");
+            HELP(COLOR_WHITE, "needs a curve. stock: the console's own bars.");
+            break;
+        case BATTERY_SETTING_RED:
+        case BATTERY_SETTING_BLINK:
+            if (setting == BATTERY_SETTING_RED)
             {
-                y += SPACING_Y;
-                y = batteryMenuLine(y, COLOR_RED, "No curve yet: the LED stays stock");
-                y = batteryMenuLine(y, COLOR_RED, "until you build one.");
+                HELP(COLOR_WHITE, "Corrected %% at which the power LED turns solid");
+                HELP(COLOR_WHITE, "red and HOME Menu shows 1 red bar.");
             }
-        }
-        else
-        {
-            y = batteryMenuLine(y, COLOR_WHITE, "LED override is now OFF.");
-            y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "The power LED is back to stock");
-            y = batteryMenuLine(y, COLOR_WHITE, "(the console decides).");
-        }
-        if (R_FAILED(res))
-        {
-            y += SPACING_Y;
-            batteryMenuLine(y, COLOR_RED, "Could not save config.ini (0x%08lx).", (u32)res);
-        }
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
-        Draw_FlushFramebuffer();
-        Draw_Unlock();
-    }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
-}
-
-void BatteryMenu_SleepLed(void)
-{
-    BatteryLedConfig cfg;
-    BatteryLed_EnsureConfigLoaded();
-    BatteryLed_GetConfig(&cfg);
-    cfg.sleepMode = BatteryLedLogic_NextSleepSetting(cfg.sleepMode);
-    Result res = BatteryLed_SetConfig(&cfg);
-    BatteryMenu_UpdateSleepLedTitle(cfg.sleepMode);
-
-    batteryMenuClear();
-    do
-    {
-        Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Sleep LED");
-        u32 y = 30;
-        y = batteryMenuLine(y, COLOR_GREEN, "Sleep LED is now: %s", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
-        y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed: this LED while the battery is");
-        y = batteryMenuLine(y, COLOR_WHITE, "above the red level or charging; steady red");
-        y = batteryMenuLine(y, COLOR_WHITE, "at the red level, the console's own warning");
-        y = batteryMenuLine(y, COLOR_WHITE, "when blinking.");
-        if (!cfg.override)
-            y = batteryMenuLine(y, COLOR_RED, "No effect while LED override is OFF.");
-        y += SPACING_Y;
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "dim:    dimmed blue while asleep (default)");
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "bright: full-brightness blue while asleep");
-        y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "off:    stock behaviour, nothing written");
-        y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Select this entry again for the next one.");
-        y = batteryMenuLine(y, COLOR_WHITE, "Status: the \"Sleep:\" and \"ptm\" lines.");
-        if (R_FAILED(res))
-        {
-            y += SPACING_Y;
-            batteryMenuLine(y, COLOR_RED, "Could not save config.ini (0x%08lx).", (u32)res);
-        }
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
-        Draw_FlushFramebuffer();
-        Draw_Unlock();
-    }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
-}
-
-void BatteryMenu_Bars(void)
-{
-    BatteryLedConfig cfg;
-    BatteryLed_EnsureConfigLoaded();
-    BatteryLed_GetConfig(&cfg);
-    cfg.bars = !cfg.bars;
-    Result res = BatteryLed_SetConfig(&cfg);
-    BatteryMenu_UpdateBarsTitle(cfg.bars);
-    bool haveCurve = BatteryCurve_IsLoaded();
-
-    batteryMenuClear();
-    do
-    {
-        Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Battery bars");
-        u32 y = 30;
-        if (cfg.bars)
-        {
-            y = batteryMenuLine(y, COLOR_GREEN, "Battery bars are now: corrected");
-            y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu's battery icon follows the");
-            y = batteryMenuLine(y, COLOR_WHITE, "corrected %% instead of the stock gauge:");
-            y = batteryMenuLine(y, COLOR_WHITE, "4 bars from %lu%%, 3 bars from %lu%%,", (u32)cfg.bars4Pct, (u32)cfg.bars3Pct);
-            y = batteryMenuLine(y, COLOR_WHITE, "2 bars above %lu%% (the red LED threshold),", (u32)cfg.redPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "1 red bar at red, blinking red bar at");
-            y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less (blinking LED threshold).", (u32)cfg.blinkPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Held while charging. Stock without a curve");
-            y = batteryMenuLine(y, COLOR_WHITE, "or on read errors. HOME Menu shows a change");
-            y = batteryMenuLine(y, COLOR_WHITE, "within about 8 s.");
-            if (!haveCurve)
+            else
             {
-                y += SPACING_Y;
-                y = batteryMenuLine(y, COLOR_RED, "No curve yet: the bars stay stock");
-                y = batteryMenuLine(y, COLOR_RED, "until you build one.");
+                HELP(COLOR_WHITE, "Corrected %% at which the power LED and the");
+                HELP(COLOR_WHITE, "HOME Menu bar start blinking red.");
             }
-        }
-        else
-        {
-            y = batteryMenuLine(y, COLOR_WHITE, "Battery bars are now: stock");
-            y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu shows the console's own bars");
-            y = batteryMenuLine(y, COLOR_WHITE, "again (from the stock gauge).");
-        }
-        if (R_FAILED(res))
-        {
-            y += SPACING_Y;
-            batteryMenuLine(y, COLOR_RED, "Could not save config.ini (0x%08lx).", (u32)res);
-        }
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
-        Draw_FlushFramebuffer();
-        Draw_Unlock();
+            HELP(COLOR_WHITE, "Order: blinking < red < 3 bars < 4 bars.");
+            HELP(COLOR_WHITE, "Within one discharge the LED only gets worse;");
+            HELP(COLOR_WHITE, "after a change it gets better again only if");
+            HELP(COLOR_WHITE, "the battery is over 0.5 points above it.");
+            break;
+        case BATTERY_SETTING_BARS4:
+        case BATTERY_SETTING_BARS3:
+            HELP(COLOR_WHITE, "HOME Menu shows %s bars from this corrected %%", setting == BATTERY_SETTING_BARS4 ? "4" : "3");
+            HELP(COLOR_WHITE, "upwards (2 bars from just above the red level).");
+            HELP(COLOR_WHITE, "Order: blinking < red < 3 bars < 4 bars.");
+            HELP(COLOR_WHITE, "Only used with HOME Menu bars: corrected.");
+            break;
+        case BATTERY_SETTING_BLUE_MODE:
+            HELP(COLOR_WHITE, "How blue is shown on the power LED (corrected):");
+            HELP(COLOR_WHITE, "red off, blue on (5): the default.");
+            HELP(COLOR_WHITE, "forced blue (1): the console's default blue.");
+            HELP(COLOR_WHITE, "Only try 1 if blue looks wrong with 5. Used at");
+            HELP(COLOR_WHITE, "the blue level and while charging; the Sleep");
+            HELP(COLOR_WHITE, "LED setting is separate.");
+            break;
+        default:
+            break;
     }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
+#undef HELP
+    for (; n < BATTERY_SETTING_HELP_LINES; n++)
+        y = batteryMenuLine(y, COLOR_WHITE, "");
+    return y;
 }
 
-void BatteryMenu_Thresholds(void)
+static bool batteryConfigEqual(const BatteryLedConfig *a, const BatteryLedConfig *b)
+{
+    return a->override == b->override && a->redPct == b->redPct && a->blinkPct == b->blinkPct && a->blueMode == b->blueMode &&
+           a->sleepMode == b->sleepMode && a->bars == b->bars && a->bars4Pct == b->bars4Pct && a->bars3Pct == b->bars3Pct;
+}
+
+// One editor for all settings: Up/Down select a row, Left/Right change it (BatteryLedConfig_Step keeps the limits),
+// SELECT undoes every change made here, B saves (only if something changed) and goes back. Same config.ini writes and
+// LED re-evaluation as the old per-entry toggles / Thresholds screen: one BatteryLed_SetConfig on the way out.
+static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows, bool curveNote)
 {
     BatteryLedConfig cfg, orig;
     u32 row = 0;
-    Result res = 0;
 
     BatteryLed_EnsureConfigLoaded();
     BatteryLed_GetConfig(&cfg);
     orig = cfg;
+    bool haveCurve = BatteryCurve_IsLoaded();
 
     batteryMenuClear();
     do
     {
+        bool dirty = !batteryConfigEqual(&cfg, &orig);
+
         Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Thresholds");
+        Draw_DrawString(10, 10, COLOR_TITLE, title);
         u32 y = 30;
-        y = batteryMenuLine(y, COLOR_WHITE, "%c Solid red at:     %2lu%% corrected", row == 0 ? '>' : ' ', (u32)cfg.redPct);
-        y = batteryMenuLine(y, COLOR_WHITE, "%c Blinking red at:  %2lu%% corrected", row == 1 ? '>' : ' ', (u32)cfg.blinkPct);
-        y = batteryMenuLine(y, COLOR_WHITE, "%c Blue mode:        %lu (%s)", row == 2 ? '>' : ' ', (u32)cfg.blueMode,
-                            cfg.blueMode == BATTERY_LED_MODE_BLUE ? "red off, blue on" : "forced default blue");
-        y = batteryMenuLine(y, COLOR_WHITE, "%c 4 bars from:     %3lu%% corrected", row == 3 ? '>' : ' ', (u32)cfg.bars4Pct);
-        y = batteryMenuLine(y, COLOR_WHITE, "%c 3 bars from:     %3lu%% corrected", row == 4 ? '>' : ' ', (u32)cfg.bars3Pct);
+        for (u32 i = 0; i < numRows; i++)
+        {
+            char value[32];
+            batterySettingValue(value, rows[i], &cfg);
+            bool inactive = rows[i] == BATTERY_SETTING_SLEEP_LED && !cfg.override;
+            y = batteryMenuLine(y, inactive ? COLOR_TITLE : COLOR_WHITE, "%c %-*s %s", i == row ? '>' : ' ',
+                                BATTERY_SETTING_LABEL_CHARS, batterySettingLabel(rows[i]), value);
+        }
         y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Blinking < solid red < 3 bars < 4 bars.");
-        y = batteryMenuLine(y, COLOR_WHITE, "Within one discharge the LED only gets");
-        y = batteryMenuLine(y, COLOR_WHITE, "worse (blue -> red -> blinking); while");
-        y = batteryMenuLine(y, COLOR_WHITE, "charging always blue. After a change it");
-        y = batteryMenuLine(y, COLOR_WHITE, "may get better if the corrected %% is more");
-        y = batteryMenuLine(y, COLOR_WHITE, "than 0.5 points above the new threshold.");
-        y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu bars: 2 bars above solid red,");
-        y = batteryMenuLine(y, COLOR_WHITE, "1 red bar at red, blinking at blinking.");
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Up/Down: select  Left/Right: change  B: save");
+        y = batterySettingHelp(y, rows[row], &cfg);
+        y += SPACING_Y;
+        if (curveNote && !haveCurve)
+            y = batteryMenuLine(y, COLOR_RED, "No curve yet: Power LED and bars stay stock.");
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "");
+        batteryMenuLine(y, COLOR_TITLE, dirty ? "Not saved yet." : "");
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Left/Right: change  SELECT: undo  B: save, back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
 
@@ -1012,61 +1041,94 @@ void BatteryMenu_Thresholds(void)
         if (pressed & KEY_B)
             break;
         else if (pressed & KEY_DOWN)
-            row = (row + 1) % 5;
+            row = (row + 1) % numRows;
         else if (pressed & KEY_UP)
-            row = (row + 4) % 5;
+            row = (row + numRows - 1) % numRows;
         else if (pressed & (KEY_LEFT | KEY_RIGHT))
-        {
-            bool inc = (pressed & KEY_RIGHT) != 0;
-            if (row == 0)
-            {
-                if (inc && cfg.redPct < BATTERY_LED_MAX_RED_PCT && cfg.redPct + 1 < cfg.bars3Pct)
-                    cfg.redPct++;
-                else if (!inc && cfg.redPct > cfg.blinkPct + 1)
-                    cfg.redPct--;
-            }
-            else if (row == 1)
-            {
-                if (inc && cfg.blinkPct + 1 < cfg.redPct)
-                    cfg.blinkPct++;
-                else if (!inc && cfg.blinkPct > 0)
-                    cfg.blinkPct--;
-            }
-            else if (row == 2)
-                cfg.blueMode = cfg.blueMode == BATTERY_LED_MODE_BLUE ? BATTERY_LED_MODE_BLUE_FORCED : BATTERY_LED_MODE_BLUE;
-            else if (row == 3)
-            {
-                if (inc && cfg.bars4Pct < BATTERY_BARS_MAX_PCT)
-                    cfg.bars4Pct++;
-                else if (!inc && cfg.bars4Pct > cfg.bars3Pct + 1)
-                    cfg.bars4Pct--;
-            }
-            else
-            {
-                if (inc && cfg.bars3Pct + 1 < cfg.bars4Pct)
-                    cfg.bars3Pct++;
-                else if (!inc && cfg.bars3Pct > cfg.redPct + 1)
-                    cfg.bars3Pct--;
-            }
-        }
+            BatteryLedConfig_Step(&cfg, rows[row], (pressed & KEY_RIGHT) ? 1 : -1);
+        else if (pressed & KEY_SELECT)
+            cfg = orig;
     }
     while (!menuShouldExit);
 
-    if (cfg.redPct != orig.redPct || cfg.blinkPct != orig.blinkPct || cfg.blueMode != orig.blueMode ||
-        cfg.bars4Pct != orig.bars4Pct || cfg.bars3Pct != orig.bars3Pct)
+    if (!batteryConfigEqual(&cfg, &orig))
     {
-        res = BatteryLed_SetConfig(&cfg);
+        Result res = BatteryLed_SetConfig(&cfg);
         if (R_FAILED(res))
         {
             char line[48];
             sprintf(line, "Error 0x%08lx.", (u32)res);
-            batteryMenuMessage("Battery Manager - Thresholds", "Could not save config.ini.", line);
+            batteryMenuMessage(title, "Could not save config.ini.", line);
+        }
+        else if (!menuShouldExit)
+        {
+            Draw_Lock();
+            Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_GREEN, "%-*s", BATTERY_MENU_LINE_CHARS, "Saved.");
+            Draw_FlushFramebuffer();
+            Draw_Unlock();
+            svcSleepThread(700 * 1000 * 1000LL);
         }
     }
     batteryMenuClear();
 }
 
-void BatteryMenu_LedTest(void)
+static void batteryMenuSettings(void)
+{
+    static const u8 rows[] = {
+        BATTERY_SETTING_POWER_LED, BATTERY_SETTING_SLEEP_LED, BATTERY_SETTING_BARS, BATTERY_SETTING_RED,
+        BATTERY_SETTING_BLINK, BATTERY_SETTING_BARS4, BATTERY_SETTING_BARS3,
+    };
+    batterySettingsEditor("Battery Manager - Settings", rows, sizeof(rows), true);
+}
+
+// Advanced > Blue LED type (config.ini blue_mode)
+static void batteryMenuBlueLedType(void)
+{
+    static const u8 rows[] = { BATTERY_SETTING_BLUE_MODE };
+    batterySettingsEditor("Battery Manager - Blue LED type", rows, sizeof(rows), false);
+}
+
+// ---- Advanced ----
+
+// Advanced > Limits and about: static text (docs 14.10, 15.10)
+static void batteryMenuAbout(void)
+{
+    static const char *const lines[] = {
+        "- The first ~5 s after power-on the LED is the",
+        "  console's own (Rosalina isn't running yet).",
+        "- During sleep the LED can't follow the battery:",
+        "  a change shows on wake. A charger plugged in",
+        "  while asleep shows when the lid opens.",
+        "- HOME Menu bars change within about 8 s.",
+        "- Sleep LED and HOME Menu bars need the New 3DS",
+        "  system module they were made for; otherwise",
+        "  they stay stock (see Diagnostics).",
+        "- Apps that read the gauge directly still get",
+        "  the stock %.",
+        "- Nothing is written to NAND. Files: SD card,",
+        "  /luma/battery/. To undo everything, use the",
+        "  official Luma3DS boot.firm.",
+        "",
+        "Luma3DS-Gauge, an unofficial Luma3DS fork.",
+    };
+
+    batteryMenuClear();
+    do
+    {
+        Draw_Lock();
+        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Limits and about");
+        u32 y = 30;
+        for (u32 i = 0; i < sizeof(lines) / sizeof(lines[0]); i++)
+            y = batteryMenuLine(y, COLOR_WHITE, "%s", lines[i]);
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
+        Draw_FlushFramebuffer();
+        Draw_Unlock();
+    }
+    while (!(waitInput() & KEY_B) && !menuShouldExit);
+}
+
+// Advanced > LED test: writes whitelisted modes by hand (BatteryLed_TestSetMode); normal control is paused meanwhile
+static void batteryMenuLedTest(void)
 {
     static const u8 modes[] = {
         BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_BLUE_FORCED, BATTERY_LED_MODE_SLEEP, BATTERY_LED_MODE_POWER_OFF,

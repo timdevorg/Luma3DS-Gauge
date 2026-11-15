@@ -237,6 +237,66 @@ u8 BatteryLedLogic_NextSleepSetting(u8 sleepMode)
     }
 }
 
+bool BatteryLedConfig_Step(BatteryLedConfig *cfg, u8 setting, s32 dir)
+{
+    bool inc = dir > 0;
+    if (dir == 0)
+        return false;
+
+    switch (setting)
+    {
+        case BATTERY_SETTING_POWER_LED:
+            cfg->override = !cfg->override;
+            return true;
+        case BATTERY_SETTING_SLEEP_LED:
+            // Three values: two steps forward are one step back
+            cfg->sleepMode = BatteryLedLogic_NextSleepSetting(cfg->sleepMode);
+            if (!inc)
+                cfg->sleepMode = BatteryLedLogic_NextSleepSetting(cfg->sleepMode);
+            return true;
+        case BATTERY_SETTING_BARS:
+            cfg->bars = !cfg->bars;
+            return true;
+        case BATTERY_SETTING_BLUE_MODE:
+            cfg->blueMode = cfg->blueMode == BATTERY_LED_MODE_BLUE ? BATTERY_LED_MODE_BLUE_FORCED : BATTERY_LED_MODE_BLUE;
+            return true;
+        case BATTERY_SETTING_RED:
+            if (inc && cfg->redPct < BATTERY_LED_MAX_RED_PCT && cfg->redPct + 1 < cfg->bars3Pct)
+                cfg->redPct++;
+            else if (!inc && cfg->redPct > cfg->blinkPct + 1)
+                cfg->redPct--;
+            else
+                return false;
+            return true;
+        case BATTERY_SETTING_BLINK:
+            if (inc && cfg->blinkPct + 1 < cfg->redPct)
+                cfg->blinkPct++;
+            else if (!inc && cfg->blinkPct > 0)
+                cfg->blinkPct--;
+            else
+                return false;
+            return true;
+        case BATTERY_SETTING_BARS4:
+            if (inc && cfg->bars4Pct < BATTERY_BARS_MAX_PCT)
+                cfg->bars4Pct++;
+            else if (!inc && cfg->bars4Pct > cfg->bars3Pct + 1)
+                cfg->bars4Pct--;
+            else
+                return false;
+            return true;
+        case BATTERY_SETTING_BARS3:
+            if (inc && cfg->bars3Pct + 1 < cfg->bars4Pct)
+                cfg->bars3Pct++;
+            else if (!inc && cfg->bars3Pct > cfg->redPct + 1)
+                cfg->bars3Pct--;
+            else
+                return false;
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool BatteryLedLogic_OwnsLed(u8 lastWritten)
 {
     return lastWritten != BATTERY_LED_MODE_AUTO && lastWritten != BATTERY_LED_MODE_UNKNOWN &&
