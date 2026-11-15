@@ -18,6 +18,7 @@
 #include "battery/battery_curve.h"
 #include "battery/battery_graph.h"
 #include "battery/battery_led.h"
+#include "battery/battery_ptm_patch.h"
 
 #define BATTERY_MENU_LINE_CHARS     49 // (320 - 2 * 10) / 6 - 1
 #define BATTERY_MENU_LIST_ROWS      15
@@ -134,11 +135,13 @@ void BatteryMenu_Status(void)
         BatteryMcuSample s;
         BatteryRecorderStatus st;
         BatteryLedStatus led;
+        BatteryPtmPatchStatus ptm;
         char dur[16], num[16], num2[16];
 
         Result res = BatteryMcu_ReadSample(&s);
         BatteryRecorder_GetStatus(&st);
         BatteryLed_GetStatus(&led);
+        BatteryPtmPatch_GetStatus(&ptm);
 
         Draw_Lock();
         Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Status");
@@ -210,6 +213,16 @@ void BatteryMenu_Status(void)
         }
         else
             y = batteryMenuLine(y, COLOR_WHITE, "Sleep: setting %s, no sleep yet", BatteryLedLogic_SleepSettingName(led.cfg.sleepMode));
+        // ptm's sleep LED byte (section 14): "05 (active)", "02 (stock)", "off: mismatch", ...
+        if (ptm.state == BATTERY_PTM_STATE_OK)
+            y = batteryMenuLine(y, COLOR_WHITE, "ptm sleep patch: %02lx (%s), writes %lu", (u32)ptm.current,
+                                BatteryPtmPatch_StateName(ptm.state, ptm.current), ptm.writes);
+        else if (ptm.state == BATTERY_PTM_STATE_NO_PTM || ptm.state == BATTERY_PTM_STATE_MAP_ERROR)
+            y = batteryMenuLine(y, COLOR_RED, "ptm sleep patch: %s 0x%08lx", BatteryPtmPatch_StateName(ptm.state, ptm.current),
+                                (u32)ptm.lastRes);
+        else
+            y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm sleep patch: %s, writes %lu",
+                                BatteryPtmPatch_StateName(ptm.state, ptm.current), ptm.writes);
         if (led.error == BATTERY_LED_ERR_WRITE_FAILED)
             y = batteryMenuLine(y, COLOR_RED, "LED: writes failed (0x%08lx), automatic", (u32)led.lastWriteRes);
         else if (led.error == BATTERY_LED_ERR_MCU_OVERRIDES)
@@ -838,7 +851,7 @@ void BatteryMenu_SleepLed(void)
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_SLEEP_SYSTEM ? COLOR_GREEN : COLOR_WHITE, "system:  write nothing, MCU decides");
         y += SPACING_Y;
         y = batteryMenuLine(y, COLOR_WHITE, "Select this entry again for the next one.");
-        y = batteryMenuLine(y, COLOR_WHITE, "Status shows the \"Sleep:\" result.");
+        y = batteryMenuLine(y, COLOR_WHITE, "Status shows the \"Sleep:\" and \"ptm\" lines.");
         if (R_FAILED(res))
         {
             y += SPACING_Y;

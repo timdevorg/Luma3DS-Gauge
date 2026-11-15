@@ -16,6 +16,10 @@
 *     "system") if the LED is blue, keeps red / blinking red; remembers what it wrote and reads 0x29
 *     back on wake (before anything is written) for the Status screen; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
 *     Both from the notification thread, synchronously (BatteryLed_HandleNotification, main.c).
+*   - ptm's own sleep LED callback would overwrite that mode with 2 (sleep animation) late in its sleep
+*     routine: at 0x214 / 0x101 / 0x104, before the ack, the matching byte (5 / 1 at a blue level with
+*     Sleep LED blue(5) / blue(1), else stock 2) is put into ptm's code (battery_ptm_patch.c, verified);
+*     also once after the first MCU read and after every settings change.
 *   - Boot: starts as soon as the SD card can be opened (config.ini, curve.bin) and mcu::HWC answers,
 *     checking every 200 ms instead of waiting a fixed time.
 *   - Never writes anything unless the override has been switched on (default off), or the
@@ -34,6 +38,7 @@
 #include "battery/battery_recorder.h"
 #include "battery/battery_led.h"
 #include "battery/battery_menu.h"
+#include "battery/battery_ptm_patch.h"
 
 #define BATTERY_LED_THREAD_PRIORITY     56      // above the recorder / task runner (58), below the menu (52)
 #define BATTERY_LED_THREAD_STACK_SIZE   0x800   // shallow call tree, no string formatting
@@ -139,22 +144,47 @@ static bool batteryLedWriteLocked(u8 mode, u64 nowMs)
     return false;
 }
 
+// Inputs of the decision from the current state (g_led.lock held, g_led.haveData)
+static void batteryLedInputsLocked(BatteryLedInputs *in)
+{
+    in->override = g_led.cfg.override;
+    in->adapter = (g_led.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
+    in->charging = (g_led.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
+    in->shellClosed = g_led.shellClosed || g_led.sleepPending || !(g_led.flags & BATTERY_MCU_FLAG_SHELL_OPEN);
+    in->shuttingDown = g_led.shuttingDown || preTerminationRequested;
+    in->error = g_led.error != BATTERY_LED_ERR_NONE;
+    in->pct = g_led.pct;
+    in->corrected = g_led.corrected;
+    in->lastWritten = g_led.watch.lastWritten;
+}
+
 // Desired mode from the current state (g_led.lock held, g_led.haveData)
 static u8 batteryLedDecideLocked(void)
 {
     BatteryLedInputs in;
-    in.override = g_led.cfg.override;
-    in.adapter = (g_led.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
-    in.charging = (g_led.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
-    in.shellClosed = g_led.shellClosed || g_led.sleepPending || !(g_led.flags & BATTERY_MCU_FLAG_SHELL_OPEN);
-    in.shuttingDown = g_led.shuttingDown || preTerminationRequested;
-    in.error = g_led.error != BATTERY_LED_ERR_NONE;
-    in.pct = g_led.pct;
-    in.corrected = g_led.corrected;
-    in.lastWritten = g_led.watch.lastWritten;
-
+    batteryLedInputsLocked(&in);
     g_led.desired = BatteryLedLogic_Decide(&g_led.logic, &g_led.cfg, &in, &g_led.reason);
     return g_led.desired;
+}
+
+// ptm sleep patch (g_led.lock held): the byte ptm's sleep LED callback should send is what the sleep hook
+// would write with the lid closed (5 / 1, else stock 2), decided on a copy of the level state so this has no
+// side effects. Then verified and written by battery_ptm_patch.c (nothing if it is already there). Called
+// while ptm can't be in that callback: before the ack of a sleep notification, or while awake.
+static void batteryLedPtmPatchLocked(void)
+{
+    u8 b = BATTERY_PTM_BYTE_STOCK;
+    if (!g_led.testMode && g_led.haveData && BatteryLedGate_IsOpen(&g_led.gate))
+    {
+        BatteryLedInputs in;
+        batteryLedInputsLocked(&in);
+        in.shellClosed = true;
+        BatteryLedLogic tmp = g_led.logic;
+        u8 reason;
+        u8 mode = BatteryLedLogic_Decide(&tmp, &g_led.cfg, &in, &reason);
+        b = BatteryPtmPatch_DesiredByte(mode, reason);
+    }
+    BatteryPtmPatch_Apply(b);
 }
 
 // Lid closed / sleep requested (notification thread): apply the sleep mode now, before the system goes on.
@@ -415,6 +445,7 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         g_led.writeFailStreak = 0;
         g_led.stormCount = 0;
     }
+    batteryLedPtmPatchLocked(); // awake (the menu is closed during sleep): ptm isn't in its sleep routine
     LightLock_Unlock(&g_led.lock);
     svcSignalEvent(g_ledKick);
 
@@ -505,7 +536,7 @@ void BatteryLed_TestEnd(void)
 
 void BatteryLed_HandleNotification(u32 notificationId)
 {
-    bool sleep = false, kick = false;
+    bool sleep = false, kick = false, ptmPatch = false;
     u64 nowMs = batteryLedNowMs();
 
     LightLock_Lock(&g_led.lock);
@@ -515,10 +546,17 @@ void BatteryLed_HandleNotification(u32 notificationId)
         case NOTIF_SHELL_CLOSED:
             g_led.shellClosed = true;
             sleep = true;
+            ptmPatch = true;
             break;
         case PTMNOTIFID_SLEEP_REQUESTED:
             g_led.sleepPending = true;
             sleep = true;
+            ptmPatch = true;
+            break;
+        case PTMNOTIFID_GOING_TO_SLEEP:
+            // Last notification ptm waits for before its sleep LED callback: re-check the patch (normally
+            // already right from 0x214 / 0x101: then nothing is mapped or written)
+            ptmPatch = true;
             break;
         case NOTIF_SHELL_OPENED: // also fired at boot
             g_led.shellClosed = false;
@@ -549,6 +587,9 @@ void BatteryLed_HandleNotification(u32 notificationId)
     // Synchronous, before the system goes on with sleep
     if (sleep)
         batteryLedSleepLocked(nowMs, !wasSleeping);
+    // Before main.c acks: ptm waits for the acks, so it can't be running its sleep LED callback now
+    if (ptmPatch)
+        batteryLedPtmPatchLocked();
     LightLock_Unlock(&g_led.lock);
 
     if (kick)
@@ -576,9 +617,23 @@ static void batteryLedThreadMain(void)
     BatteryLed_EnsureConfigLoaded();
 
     Handle handles[2] = { preTerminationEvent, g_ledKick };
+    bool ptmChecked = false;
     for (;;)
     {
         batteryLedPoll();
+
+        // ptm sleep patch: verify once at boot (and set it for the current setting / level), so Status shows
+        // the result before the first sleep. If ptm isn't running yet, the next sleep / settings change retries.
+        if (!ptmChecked)
+        {
+            LightLock_Lock(&g_led.lock);
+            if (g_led.haveData)
+            {
+                ptmChecked = true;
+                batteryLedPtmPatchLocked();
+            }
+            LightLock_Unlock(&g_led.lock);
+        }
 
         LightLock_Lock(&g_led.lock);
         u32 ms = batteryLedIntervalLocked(batteryLedNowMs());
@@ -605,6 +660,7 @@ MyThread *BatteryLed_CreateThread(void)
     BatteryLedWatch_Init(&g_led.watch);
     BatteryLedSmoother_Init(&g_led.volt);
     BatteryLedGate_Init(&g_led.gate);
+    BatteryPtmPatch_Init();
     g_led.startMs = batteryLedNowMs();
     g_led.desired = BATTERY_LED_MODE_AUTO;
     g_led.reason = BATTERY_LED_REASON_NO_DATA;
