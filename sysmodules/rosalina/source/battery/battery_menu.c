@@ -213,18 +213,25 @@ void BatteryMenu_Status(void)
         }
         else
             y = batteryMenuLine(y, COLOR_WHITE, "Sleep: setting %s, no sleep yet", BatteryLedLogic_SleepSettingName(led.cfg.sleepMode));
-        // ptm's sleep LED byte (section 14): "05 (active)", "02 (stock)", "off: mismatch", ...
+        // ptm's sleep / wake LED bytes (section 14): "sleep 05 wake 05 (active)", "sleep 02 wake 00 (stock)", "off: ..."
+        const char *ptmName = BatteryPtmPatch_StateName(ptm.state, ptm.sleepCur, ptm.wakeCur);
         if (ptm.state == BATTERY_PTM_STATE_OK)
-            y = batteryMenuLine(y, COLOR_WHITE, "ptm sleep patch: %02lx (%s), writes %lu", (u32)ptm.current,
-                                BatteryPtmPatch_StateName(ptm.state, ptm.current), ptm.writes);
+            y = batteryMenuLine(y, COLOR_WHITE, "ptm patch: sleep %02lx wake %02lx (%s), writes %lu", (u32)ptm.sleepCur,
+                                (u32)ptm.wakeCur, ptmName, ptm.writes);
         else if (ptm.state == BATTERY_PTM_STATE_NO_PTM || ptm.state == BATTERY_PTM_STATE_MAP_ERROR)
-            y = batteryMenuLine(y, COLOR_RED, "ptm sleep patch: %s 0x%08lx", BatteryPtmPatch_StateName(ptm.state, ptm.current),
-                                (u32)ptm.lastRes);
+            y = batteryMenuLine(y, COLOR_RED, "ptm patch: %s 0x%08lx", ptmName, (u32)ptm.lastRes);
         else if (ptm.state == BATTERY_PTM_STATE_OFF_TITLE)
-            y = batteryMenuLine(y, COLOR_RED, "ptm sleep patch: off: title id %08lx%08lx", (u32)(ptm.titleId >> 32), (u32)ptm.titleId);
+            y = batteryMenuLine(y, COLOR_RED, "ptm patch: off: title id %08lx%08lx", (u32)(ptm.titleId >> 32), (u32)ptm.titleId);
+        else if (ptm.state == BATTERY_PTM_STATE_OFF_MISMATCH)
+            y = batteryMenuLine(y, COLOR_RED, "ptm patch: off: mismatch (%s), both off",
+                                ptm.mismatch == (BATTERY_PTM_MISMATCH_SLEEP | BATTERY_PTM_MISMATCH_WAKE) ? "sleep+wake" :
+                                ptm.mismatch == BATTERY_PTM_MISMATCH_WAKE ? "wake" : "sleep");
+        else if (ptm.state == BATTERY_PTM_STATE_WRITE_ERROR)
+            y = batteryMenuLine(y, COLOR_RED, "ptm patch: write error (want %02lx/%02lx), writes %lu", (u32)ptm.sleepWant,
+                                (u32)ptm.wakeWant, ptm.writes);
         else
-            y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm sleep patch: %s, writes %lu",
-                                BatteryPtmPatch_StateName(ptm.state, ptm.current), ptm.writes);
+            y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm patch: %s, writes %lu",
+                                ptmName, ptm.writes);
         if (led.error == BATTERY_LED_ERR_WRITE_FAILED)
             y = batteryMenuLine(y, COLOR_RED, "LED: writes failed (0x%08lx), automatic", (u32)led.lastWriteRes);
         else if (led.error == BATTERY_LED_ERR_MCU_OVERRIDES)
@@ -843,9 +850,10 @@ void BatteryMenu_SleepLed(void)
         u32 y = 30;
         y = batteryMenuLine(y, COLOR_GREEN, "Sleep LED is now: %s", BatteryLedLogic_SleepSettingName(cfg.sleepMode));
         y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "Written when the lid closes while the LED");
-        y = batteryMenuLine(y, COLOR_WHITE, "is blue (override on). Red / blinking red");
-        y = batteryMenuLine(y, COLOR_WHITE, "stay as they are.");
+        y = batteryMenuLine(y, COLOR_WHITE, "Lid closed, override on: this mode at a");
+        y = batteryMenuLine(y, COLOR_WHITE, "blue level or while charging. With blue(5)/");
+        y = batteryMenuLine(y, COLOR_WHITE, "blue(1): red level solid red, blinking level");
+        y = batteryMenuLine(y, COLOR_WHITE, "the MCU's own low warning.");
         y += SPACING_Y;
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE ? COLOR_GREEN : COLOR_WHITE, "blue(5): blue on, red off (default)");
         y = batteryMenuLine(y, cfg.sleepMode == BATTERY_LED_MODE_BLUE_FORCED ? COLOR_GREEN : COLOR_WHITE, "blue(1): forced default blue");

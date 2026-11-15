@@ -2,18 +2,19 @@
 *   This file is part of Luma3DS-Gauge, an unofficial fork of Luma3DS.
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
-*   Battery Manager: ptm sleep LED patch, Rosalina part.
+*   Battery Manager: ptm sleep / wake LED patch, Rosalina part.
 *
-*   Changes exactly one byte in the running ptm process's code in RAM: the immediate of the
-*   "movs r1, #2" at VA 0x101a28 that ptm passes to mcu::RTC SetPowerLedState in its sleep LED callback
-*   (see battery_ptm_patch.h). Only after verifying the process name, title ID, code layout and the
-*   16 bytes around it; only values 0x02 (stock) / 0x01 / 0x05. Nothing is written to NAND, SD or
-*   firmware, and no MCU register is written: ptm still sends its own command. Gone at the next boot.
+*   Changes at most two bytes in the running ptm process's code in RAM: the immediates of the
+*   "movs r1, #mode" that ptm passes to mcu::RTC SetPowerLedState in its sleep LED callback (VA 0x101a28)
+*   and in its wake LED callback (VA 0x10199e), see battery_ptm_patch.h. Only after verifying the process
+*   name, title ID, code layout and both 16-byte patterns; only whitelisted values (sleep 02 / 01 / 04 / 05,
+*   wake 00 / 01 / 04 / 05). Nothing is written to NAND, SD or firmware, and no MCU register is written:
+*   ptm still sends its own commands. Gone at the next boot.
 *
 *   Mechanism, as Rosalina's own code patches (input_redirection.c, gdb/mem.c, plugin/file_loader.c):
-*   OpenProcessByName (process_patches.c), svcMapProcessMemoryEx of the one code page into Rosalina (RW),
-*   write, svcFlushEntireDataCache + svcInvalidateEntireInstructionCache, svcUnmapProcessMemoryEx,
-*   svcCloseHandle. Design: docs/battery-manager.md, section 14.
+*   OpenProcessByName (process_patches.c), svcMapProcessMemoryEx of the one code page (both bytes are on
+*   0x101000) into Rosalina (RW), write, svcFlushEntireDataCache + svcInvalidateEntireInstructionCache,
+*   svcUnmapProcessMemoryEx, svcCloseHandle. Design: docs/battery-manager.md, section 14.
 */
 
 #include <3ds.h>
@@ -38,8 +39,8 @@ void BatteryPtmPatch_Init(void)
 {
     LightLock_Init(&g_ptm.lock);
     g_ptm.st.state = BATTERY_PTM_STATE_UNCHECKED;
-    g_ptm.st.current = BATTERY_PTM_BYTE_STOCK;
-    g_ptm.st.desired = BATTERY_PTM_BYTE_STOCK;
+    g_ptm.st.sleepCur = g_ptm.st.sleepWant = BATTERY_PTM_SLEEP_STOCK;
+    g_ptm.st.wakeCur = g_ptm.st.wakeWant = BATTERY_PTM_WAKE_STOCK;
 }
 
 static bool batteryPtmIsOff(u8 state)
@@ -54,10 +55,21 @@ static void batteryPtmRead(volatile const u8 *p, u8 *out)
         out[i] = p[i];
 }
 
-// Verifies and (if needed) writes, with ptm's process handle open. g_ptm.lock held.
-static void batteryPtmApplyToProcessLocked(Handle h, u8 desired)
+// Both patterns: 0 if they verify, else BATTERY_PTM_MISMATCH_* bits
+static u8 batteryPtmVerifyBoth(const u8 *sleepBuf, const u8 *wakeBuf)
 {
-    // 1. Title ID: New 3DS ptm only (the O3DS ptm, 0004013000002202, has a different layout)
+    u8 m = 0;
+    if (!BatteryPtmPatch_VerifySleep(sleepBuf))
+        m |= BATTERY_PTM_MISMATCH_SLEEP;
+    if (!BatteryPtmPatch_VerifyWake(wakeBuf))
+        m |= BATTERY_PTM_MISMATCH_WAKE;
+    return m;
+}
+
+// Verifies and (if needed) writes, with ptm's process handle open. g_ptm.lock held.
+static void batteryPtmApplyToProcessLocked(Handle h, u8 sleepByte, u8 wakeByte)
+{
+    // 1. Title ID (with or without the N3DS bit; the O3DS ptm fails the code checks below)
     s64 tid = 0;
     Result tidRes = svcGetProcessInfo(&tid, h, 0x10001);
     g_ptm.st.titleId = (u64)tid;
@@ -67,17 +79,17 @@ static void batteryPtmApplyToProcessLocked(Handle h, u8 desired)
         return;
     }
 
-    // 2. Layout: .text starts at 0x00100000 and covers the 16 bytes
+    // 2. Layout: .text starts at 0x00100000 and covers both patterns
     s64 textStart = 0, textSize = 0;
     if (R_FAILED(svcGetProcessInfo(&textStart, h, 0x10005)) || R_FAILED(svcGetProcessInfo(&textSize, h, 0x10002)) ||
         (u64)textStart != BATTERY_PTM_CODE_BASE ||
-        (u64)textSize < (u64)(BATTERY_PTM_PATTERN_VA + BATTERY_PTM_PATTERN_LEN - BATTERY_PTM_CODE_BASE))
+        (u64)textSize < (u64)(BATTERY_PTM_CODE_END_VA - BATTERY_PTM_CODE_BASE))
     {
         g_ptm.st.state = BATTERY_PTM_STATE_OFF_LAYOUT;
         return;
     }
 
-    // 3. Map the one code page (0x101000) into Rosalina, read-write
+    // 3. Map the one code page (0x101000, holds both patterns) into Rosalina, read-write
     Result res = svcMapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_PTM_MAP_ADDR, h, BATTERY_PTM_PAGE_VA, BATTERY_PTM_PAGE_SIZE, 0);
     if (R_FAILED(res))
     {
@@ -86,34 +98,56 @@ static void batteryPtmApplyToProcessLocked(Handle h, u8 desired)
         return;
     }
 
-    volatile u8 *p = (volatile u8 *)(BATTERY_PTM_MAP_ADDR + (BATTERY_PTM_PATTERN_VA - BATTERY_PTM_PAGE_VA));
-    u8 buf[BATTERY_PTM_PATTERN_LEN];
-    batteryPtmRead(p, buf);
+    volatile u8 *ps = (volatile u8 *)(BATTERY_PTM_MAP_ADDR + (BATTERY_PTM_SLEEP_PATTERN_VA - BATTERY_PTM_PAGE_VA));
+    volatile u8 *pw = (volatile u8 *)(BATTERY_PTM_MAP_ADDR + (BATTERY_PTM_WAKE_PATTERN_VA - BATTERY_PTM_PAGE_VA));
+    u8 sbuf[BATTERY_PTM_PATTERN_LEN], wbuf[BATTERY_PTM_PATTERN_LEN];
+    batteryPtmRead(ps, sbuf);
+    batteryPtmRead(pw, wbuf);
     g_ptm.st.checks++;
 
-    // 4. The 16 bytes: exact, except byte 10 in {02, 01, 05}. Anything else: off for this boot, nothing written
-    if (!BatteryPtmPatch_Verify(buf))
-        g_ptm.st.state = BATTERY_PTM_STATE_OFF_MISMATCH;
-    else if (buf[BATTERY_PTM_MODE_INDEX] == desired)
+    // 4. Both 16-byte patterns: exact, except byte 10 of each within its whitelist. Either one wrong: both
+    //    patches off for this boot, nothing written
+    u8 mismatch = batteryPtmVerifyBoth(sbuf, wbuf);
+    if (mismatch != 0)
     {
-        g_ptm.st.state = BATTERY_PTM_STATE_OK;
-        g_ptm.st.current = desired;
+        g_ptm.st.state = BATTERY_PTM_STATE_OFF_MISMATCH;
+        g_ptm.st.mismatch = mismatch;
     }
     else
     {
-        // 5. The only write: one byte at ptm VA 0x101a28, value 02 / 01 / 05 (checked by the caller)
-        p[BATTERY_PTM_MODE_INDEX] = desired;
-        // Our write sits in this core's data cache: clean it to memory, then drop stale copies of that
-        // instruction from the instruction caches, as Rosalina's GDB stub does after writing code
-        svcFlushEntireDataCache();
-        svcInvalidateEntireInstructionCache();
+        // 5. The only writes: one byte at ptm VA 0x101a28 (sleep) and one at 0x10199e (wake), each only if it
+        //    differs, values whitelisted (checked by BatteryPtmPatch_Apply)
+        u32 n = 0;
+        if (sbuf[BATTERY_PTM_MODE_INDEX] != sleepByte)
+        {
+            ps[BATTERY_PTM_MODE_INDEX] = sleepByte;
+            n++;
+        }
+        if (wbuf[BATTERY_PTM_MODE_INDEX] != wakeByte)
+        {
+            pw[BATTERY_PTM_MODE_INDEX] = wakeByte;
+            n++;
+        }
 
-        batteryPtmRead(p, buf);
-        if (BatteryPtmPatch_Verify(buf) && buf[BATTERY_PTM_MODE_INDEX] == desired)
+        if (n != 0)
+        {
+            // Our writes sit in this core's data cache: clean it to memory, then drop stale copies of those
+            // instructions from the instruction caches, as Rosalina's GDB stub does after writing code
+            svcFlushEntireDataCache();
+            svcInvalidateEntireInstructionCache();
+
+            // 6. Read back both and verify again
+            batteryPtmRead(ps, sbuf);
+            batteryPtmRead(pw, wbuf);
+        }
+
+        if (batteryPtmVerifyBoth(sbuf, wbuf) == 0 && sbuf[BATTERY_PTM_MODE_INDEX] == sleepByte &&
+            wbuf[BATTERY_PTM_MODE_INDEX] == wakeByte)
         {
             g_ptm.st.state = BATTERY_PTM_STATE_OK;
-            g_ptm.st.current = desired;
-            g_ptm.st.writes++;
+            g_ptm.st.sleepCur = sleepByte;
+            g_ptm.st.wakeCur = wakeByte;
+            g_ptm.st.writes += n;
         }
         else
             g_ptm.st.state = BATTERY_PTM_STATE_WRITE_ERROR;
@@ -123,16 +157,18 @@ static void batteryPtmApplyToProcessLocked(Handle h, u8 desired)
     svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_PTM_MAP_ADDR, BATTERY_PTM_PAGE_SIZE);
 }
 
-void BatteryPtmPatch_Apply(u8 desired)
+void BatteryPtmPatch_Apply(u8 sleepByte, u8 wakeByte)
 {
-    if (!BatteryPtmPatch_ByteAllowed(desired))
+    if (!BatteryPtmPatch_SleepByteAllowed(sleepByte) || !BatteryPtmPatch_WakeByteAllowed(wakeByte))
         return; // never written
 
     LightLock_Lock(&g_ptm.lock);
-    g_ptm.st.desired = desired;
+    g_ptm.st.sleepWant = sleepByte;
+    g_ptm.st.wakeWant = wakeByte;
 
-    // Off for this boot, or already there (we are the only writer: no need to map the page again)
-    bool skip = batteryPtmIsOff(g_ptm.st.state) || (g_ptm.st.state == BATTERY_PTM_STATE_OK && g_ptm.st.current == desired);
+    // Off for this boot, or both already there (we are the only writer: no need to map the page again)
+    bool skip = batteryPtmIsOff(g_ptm.st.state) ||
+                (g_ptm.st.state == BATTERY_PTM_STATE_OK && g_ptm.st.sleepCur == sleepByte && g_ptm.st.wakeCur == wakeByte);
     if (!skip)
     {
         // OpenProcessByName opens the processes one at a time and closes every handle but ptm's
@@ -145,7 +181,7 @@ void BatteryPtmPatch_Apply(u8 desired)
         }
         else
         {
-            batteryPtmApplyToProcessLocked(h, desired);
+            batteryPtmApplyToProcessLocked(h, sleepByte, wakeByte);
             svcCloseHandle(h);
         }
     }

@@ -17,9 +17,12 @@
 *     back on wake (before anything is written) for the Status screen; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
 *     Both from the notification thread, synchronously (BatteryLed_HandleNotification, main.c).
 *   - ptm's own sleep LED callback would overwrite that mode with 2 (sleep animation) late in its sleep
-*     routine: at 0x214 / 0x101 / 0x104, before the ack, the matching byte (5 / 1 at a blue level with
-*     Sleep LED blue(5) / blue(1), else stock 2) is put into ptm's code (battery_ptm_patch.c, verified);
-*     also once after the first MCU read and after every settings change.
+*     routine, and its wake LED callback sets 0 (automatic) on wake: at 0x214 / 0x101 / 0x104, before the
+*     ack, the matching bytes are put into ptm's code (battery_ptm_patch.c, verified): with Sleep LED
+*     blue(5) / blue(1), sleep 5 / 1 and wake blue_mode at a blue level or while charging, 4 / 4 at red,
+*     else stock 2 / 0. Also once after the first MCU read and after every settings change.
+*   - Sleep transition: while sleep is pending the thread writes nothing, and while the lid is closed it
+*     doesn't re-assert on a mismatch (BatteryLedLogic_ThreadAction), so ptm's byte is never fought.
 *   - Boot: starts as soon as the SD card can be opened (config.ini, curve.bin) and mcu::HWC answers,
 *     checking every 200 ms instead of waiting a fixed time.
 *   - Never writes anything unless the override has been switched on (default off), or the
@@ -56,6 +59,7 @@
 #define BATTERY_LED_STORM_REASSERTS     12      // more re-asserts than this within the window -> give up
 #define BATTERY_LED_ERROR_RETRY_MS      5000u   // in error state: retry writing "automatic" this often
 #define BATTERY_LED_SHELL_OPEN_POLLS    3       // MCU says "open" this often while 0x213 is missing -> open
+#define BATTERY_LED_SLEEP_OPEN_POLLS    5       // sleep pending but the MCU says "open" this often -> not pending
 
 #define NOTIF_SHELL_OPENED              0x213
 #define NOTIF_SHELL_CLOSED              0x214
@@ -83,6 +87,7 @@ static struct
     bool shellClosed;       // 0x214 seen, cleared by 0x213
     bool sleepPending;      // sleep requested, cleared by "sleep denied" / "fully awake" / 0x213
     u8 shellOpenPolls;
+    u8 sleepOpenPolls;
     bool shuttingDown;
     bool testMode;
     bool prevCharger;       // adapter / charging on the previous poll (voltage median reset on unplug)
@@ -167,13 +172,14 @@ static u8 batteryLedDecideLocked(void)
     return g_led.desired;
 }
 
-// ptm sleep patch (g_led.lock held): the byte ptm's sleep LED callback should send is what the sleep hook
-// would write with the lid closed (5 / 1, else stock 2), decided on a copy of the level state so this has no
-// side effects. Then verified and written by battery_ptm_patch.c (nothing if it is already there). Called
-// while ptm can't be in that callback: before the ack of a sleep notification, or while awake.
+// ptm sleep / wake patch (g_led.lock held): the bytes follow what the sleep hook would write with the lid
+// closed, decided on a copy of the level state so this has no side effects (BatteryPtmPatch_DesiredBytes:
+// sleep 5 / 1 and wake blue_mode at a blue level or while charging, 4 / 4 at red, else stock 2 / 0). Then
+// verified and written by battery_ptm_patch.c (nothing if both are already there). Called while ptm can't be
+// in either callback: before the ack of a sleep notification, or while awake.
 static void batteryLedPtmPatchLocked(void)
 {
-    u8 b = BATTERY_PTM_BYTE_STOCK;
+    u8 sleepByte = BATTERY_PTM_SLEEP_STOCK, wakeByte = BATTERY_PTM_WAKE_STOCK;
     if (!g_led.testMode && g_led.haveData && BatteryLedGate_IsOpen(&g_led.gate))
     {
         BatteryLedInputs in;
@@ -182,9 +188,9 @@ static void batteryLedPtmPatchLocked(void)
         BatteryLedLogic tmp = g_led.logic;
         u8 reason;
         u8 mode = BatteryLedLogic_Decide(&tmp, &g_led.cfg, &in, &reason);
-        b = BatteryPtmPatch_DesiredByte(mode, reason);
+        BatteryPtmPatch_DesiredBytes(&g_led.cfg, mode, reason, &sleepByte, &wakeByte);
     }
-    BatteryPtmPatch_Apply(b);
+    BatteryPtmPatch_Apply(sleepByte, wakeByte);
 }
 
 // Lid closed / sleep requested (notification thread): apply the sleep mode now, before the system goes on.
@@ -205,7 +211,9 @@ static void batteryLedSleepLocked(u64 nowMs, bool entering)
         return;
 
     u8 desired = batteryLedDecideLocked();
-    u8 mode = BatteryLedLogic_SleepWrite(desired, g_led.reason, g_led.logic.level, g_led.watch.lastWritten, entering);
+    bool charger = (g_led.flags & (BATTERY_MCU_FLAG_ADAPTER | BATTERY_MCU_FLAG_CHARGING)) != 0;
+    u8 level = BatteryLedLogic_SleepLevel(&g_led.cfg, g_led.logic.level, charger);
+    u8 mode = BatteryLedLogic_SleepWrite(desired, g_led.reason, level, g_led.watch.lastWritten, entering);
     if (mode != BATTERY_LED_MODE_KEEP && batteryLedWriteLocked(mode, nowMs)) // not rate limited: last chance before sleep
         g_led.sleepWrote = mode;
 }
@@ -254,6 +262,16 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
     else
         g_led.shellOpenPolls = 0;
 
+    // Missed "sleep denied" / "fully awake" fallback: sleep pending, but the MCU keeps saying "shell open" (a real
+    // sleep halts this thread within a second or two; the flag would otherwise block the thread's writes)
+    if (fresh && g_led.sleepPending && (g_led.flags & BATTERY_MCU_FLAG_SHELL_OPEN))
+    {
+        if (++g_led.sleepOpenPolls >= BATTERY_LED_SLEEP_OPEN_POLLS)
+            g_led.sleepPending = false;
+    }
+    else if (fresh)
+        g_led.sleepOpenPolls = 0;
+
     u8 desired = batteryLedDecideLocked();
 
     // Sleep diagnostics: the first fresh poll that is no longer "lid closed" records the 0x29 read-back of
@@ -289,13 +307,16 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
     if (!rateOk)
         return;
 
-    if (desired != g_led.watch.lastWritten)
+    // Sleep transition guard: nothing while sleep is pending, no re-assert while the lid is closed (ptm's patched
+    // byte or the MCU's own sleep indication rules until wake); awake: write on change, else check for a mismatch
+    u8 action = BatteryLedLogic_ThreadAction(desired, g_led.watch.lastWritten, g_led.reason, g_led.sleepPending);
+    if (action == BATTERY_LED_ACTION_WRITE)
     {
         batteryLedWriteLocked(desired, nowMs);
         return;
     }
 
-    if (BatteryLedWatch_Mismatch(&g_led.watch, desired, &g_led.obs, nowMs))
+    if (action == BATTERY_LED_ACTION_CHECK && BatteryLedWatch_Mismatch(&g_led.watch, desired, &g_led.obs, nowMs))
     {
         g_led.reasserts++;
         g_led.haveMismatch = true;
@@ -550,6 +571,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
             break;
         case PTMNOTIFID_SLEEP_REQUESTED:
             g_led.sleepPending = true;
+            g_led.sleepOpenPolls = 0;
             sleep = true;
             ptmPatch = true;
             break;
@@ -561,6 +583,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
         case NOTIF_SHELL_OPENED: // also fired at boot
             g_led.shellClosed = false;
             g_led.sleepPending = false;
+            g_led.sleepOpenPolls = 0;
             kick = true;
             break;
         case PTMNOTIFID_SLEEP_DENIED:

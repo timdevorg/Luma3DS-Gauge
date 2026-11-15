@@ -64,7 +64,7 @@ MyThread *BatteryLed_CreateThread(void);
 /// battery low (0x211/0x212), shutdown (0x108) and pre-termination (0x2000). Runs in the
 /// notification thread; synchronously writes the Sleep LED setting before sleep (if the LED is blue and
 /// ours; nothing for "system") and "power off" once at the first shutdown signal (if the LED is ours), then nothing more.
-/// At 0x214 / 0x101 / 0x104 also sets ptm's sleep LED byte (battery_ptm_patch.h) before main.c acks.
+/// At 0x214 / 0x101 / 0x104 also sets ptm's sleep and wake LED bytes (battery_ptm_patch.h) before main.c acks.
 void BatteryLed_HandleNotification(u32 notificationId);
 
 void BatteryLed_GetStatus(BatteryLedStatus *out);

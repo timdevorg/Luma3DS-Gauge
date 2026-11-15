@@ -161,8 +161,11 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
 /// Mode for a level.
 u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level);
 /// Mode while the lid is closed / sleeping: blue -> cfg->sleepMode (5 / 1 / 2, or KEEP for "system"),
-/// red / blinking red kept (4 / 6).
+/// red / blinking red kept (4 / 6). Decide passes BatteryLedLogic_SleepLevel (charging -> blue).
 u8 BatteryLedLogic_SleepModeForLevel(const BatteryLedConfig *cfg, u8 level);
+/// Level used for the sleep mode: BATTERY_LED_LEVEL_BLUE when charging (adapter / charging flag) with Sleep LED
+/// blue(5) / blue(1), else `level`. Used by Decide (lid closed) and the sleep hook.
+u8 BatteryLedLogic_SleepLevel(const BatteryLedConfig *cfg, u8 level, bool charger);
 /// What the sleep hook writes (BATTERY_LED_MODE_KEEP = nothing). desired / reason from Decide with the lid
 /// closed. entering: the first sleep signal of this sleep (0x214 or 0x101): at the blue level the configured
 /// sleep mode is written even if it equals the last written mode. Otherwise only when NeedsWrite says so
@@ -177,6 +180,21 @@ bool BatteryLedLogic_OwnsLed(u8 lastWritten);
 /// Whether a desired mode has to be written now (KEEP: never; automatic: only to undo our own write;
 /// else: when it differs from the last written mode).
 bool BatteryLedLogic_NeedsWrite(u8 desired, u8 lastWritten);
+
+/// What the LED thread does on a fresh poll with a non-automatic desired mode (battery_led.c,
+/// batteryLedControlLocked; rate limit and the automatic / error path are handled there).
+typedef enum BatteryLedAction
+{
+    BATTERY_LED_ACTION_NONE = 0,    // nothing
+    BATTERY_LED_ACTION_WRITE,       // desired differs from the last written mode: write it
+    BATTERY_LED_ACTION_CHECK,       // same mode: check for a mismatch and re-assert if needed
+} BatteryLedAction;
+
+/// Sleep transition guard (section 14): while sleep is pending (0x101 until wake / sleep denied) nothing is
+/// written by the thread; while the lid is closed (reason "lid closed") a changed desired mode is still written
+/// but there is no mismatch re-assert, so ptm's (patched) sleep byte and the MCU are never fought between sleep
+/// entry and wake. Awake: unchanged (write on change, else mismatch check).
+u8 BatteryLedLogic_ThreadAction(u8 desired, u8 lastWritten, u8 reason, bool sleepPending);
 
 void BatteryLedGate_Init(BatteryLedGate *g);
 /// A shutdown signal (0x108, 0x2000, thread exit). Only the first call can return BATTERY_LED_MODE_POWER_OFF:

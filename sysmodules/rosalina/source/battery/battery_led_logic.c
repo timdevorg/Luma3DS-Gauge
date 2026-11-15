@@ -153,6 +153,15 @@ u8 BatteryLedLogic_SleepModeForLevel(const BatteryLedConfig *cfg, u8 level)
     }
 }
 
+u8 BatteryLedLogic_SleepLevel(const BatteryLedConfig *cfg, u8 level, bool charger)
+{
+    // Charging at sleep entry: blue while asleep with Sleep LED blue(5) / blue(1), whatever the level (the ptm
+    // sleep byte follows the same rule, section 14). anim(2) / system: the level as it is.
+    if (charger && (cfg->sleepMode == BATTERY_LED_MODE_BLUE || cfg->sleepMode == BATTERY_LED_MODE_BLUE_FORCED))
+        return BATTERY_LED_LEVEL_BLUE;
+    return level;
+}
+
 u8 BatteryLedLogic_SleepWrite(u8 desired, u8 reason, u8 level, u8 lastWritten, bool entering)
 {
     if (desired == BATTERY_LED_MODE_KEEP)
@@ -290,7 +299,7 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
             if (in->lastWritten == BATTERY_LED_MODE_UNKNOWN || in->lastWritten == BATTERY_LED_MODE_AUTO)
                 mode = BATTERY_LED_MODE_KEEP;
             else
-                mode = BatteryLedLogic_SleepModeForLevel(cfg, l->level);
+                mode = BatteryLedLogic_SleepModeForLevel(cfg, BatteryLedLogic_SleepLevel(cfg, l->level, charger));
         }
         else
         {
@@ -302,6 +311,23 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
     if (outReason != NULL)
         *outReason = reason;
     return mode;
+}
+
+u8 BatteryLedLogic_ThreadAction(u8 desired, u8 lastWritten, u8 reason, bool sleepPending)
+{
+    if (desired == BATTERY_LED_MODE_KEEP || desired == BATTERY_LED_MODE_AUTO)
+        return BATTERY_LED_ACTION_NONE; // KEEP: nothing; automatic has its own path in battery_led.c
+    // Sleep requested (0x101 until wake / denied): the sleep hook has written the sleep mode and ptm's sleep LED
+    // callback sends its (patched) byte right before sleep. The thread writes nothing at all then.
+    if (sleepPending)
+        return BATTERY_LED_ACTION_NONE;
+    if (desired != lastWritten)
+        return BATTERY_LED_ACTION_WRITE;
+    // Lid closed: no mismatch re-assert. ptm's byte (02 at the blink level) or the MCU's own sleep indication
+    // may legitimately differ from our last write until wake; re-asserting would fight it (section 14).
+    if (reason == BATTERY_LED_REASON_SHELL)
+        return BATTERY_LED_ACTION_NONE;
+    return BATTERY_LED_ACTION_CHECK;
 }
 
 // ---- Shutdown latch ----
