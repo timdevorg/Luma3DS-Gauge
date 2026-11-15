@@ -180,6 +180,18 @@ void BatteryMenu_Status(void)
             y = batteryMenuLine(y, COLOR_RED, "LED: MCU keeps overriding, automatic");
         else if (led.writeFailures != 0)
             y = batteryMenuLine(y, COLOR_RED, "LED write failures: %lu (0x%08lx)", led.writeFailures, (u32)led.lastWriteRes);
+        else if (led.firstWriteMs != 0 || led.firstDataMs != 0)
+        {
+            // Boot timing (s since the tick counter started, ~power-on): Rosalina, SD usable, first write
+            char t0[16], t1[16], t2[16];
+            batteryFormatX10(t0, led.startMs / 1000.0f);
+            batteryFormatX10(t1, led.sdReadyMs / 1000.0f);
+            if (led.firstWriteMs != 0)
+                batteryFormatX10(t2, led.firstWriteMs / 1000.0f);
+            else
+                memcpy(t2, "-", 2);
+            y = batteryMenuLine(y, COLOR_WHITE, "Boot s: Rosalina %s SD %s 1st LED %s", t0, t1, t2);
+        }
         else
             y = batteryMenuLine(y, COLOR_WHITE, "");
 
@@ -735,7 +747,8 @@ void BatteryMenu_LedOverride(void)
             y = batteryMenuLine(y, COLOR_WHITE, "Corrected %% above %lu%%: blue (mode %lu)", (u32)cfg.redPct, (u32)cfg.blueMode);
             y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: solid red", (u32)cfg.redPct);
             y = batteryMenuLine(y, COLOR_WHITE, "%lu%% or less: blinking red", (u32)cfg.blinkPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Charger, lid closed, power-off: automatic.");
+            y = batteryMenuLine(y, COLOR_WHITE, "Charging: only gets better. Lid closed:");
+            y = batteryMenuLine(y, COLOR_WHITE, "sleep animation if blue. Power off: mode 3.");
             if (!haveCurve)
             {
                 y += SPACING_Y;
@@ -785,8 +798,8 @@ void BatteryMenu_Thresholds(void)
         y += SPACING_Y;
         y = batteryMenuLine(y, COLOR_WHITE, "Blinking must be below solid red.");
         y = batteryMenuLine(y, COLOR_WHITE, "Within one discharge the LED only gets");
-        y = batteryMenuLine(y, COLOR_WHITE, "worse (blue -> red -> blinking) until the");
-        y = batteryMenuLine(y, COLOR_WHITE, "charger is plugged in. After a change it");
+        y = batteryMenuLine(y, COLOR_WHITE, "worse (blue -> red -> blinking), while");
+        y = batteryMenuLine(y, COLOR_WHITE, "charging only better. After a change it");
         y = batteryMenuLine(y, COLOR_WHITE, "may get better if the corrected %% is more");
         y = batteryMenuLine(y, COLOR_WHITE, "than 0.5 points above the new threshold.");
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Up/Down: select  Left/Right: change  B: save");
@@ -839,12 +852,12 @@ void BatteryMenu_Thresholds(void)
 void BatteryMenu_LedTest(void)
 {
     static const u8 modes[] = {
-        BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_BLUE_FORCED, BATTERY_LED_MODE_RED,
-        BATTERY_LED_MODE_BLUE, BATTERY_LED_MODE_BLINK,
+        BATTERY_LED_MODE_AUTO, BATTERY_LED_MODE_BLUE_FORCED, BATTERY_LED_MODE_SLEEP, BATTERY_LED_MODE_POWER_OFF,
+        BATTERY_LED_MODE_RED, BATTERY_LED_MODE_BLUE, BATTERY_LED_MODE_BLINK,
     };
     static const char *const descriptions[] = {
-        "automatic (MCU decides)", "forced default blue", "blue off, red on",
-        "red off, blue on", "blue off, flash red",
+        "automatic (MCU decides)", "forced default blue", "sleep animation", "\"power off\" mode",
+        "blue off, red on", "red off, blue on", "blue off, flash red",
     };
     u32 row = 0;
     s32 written = -1;

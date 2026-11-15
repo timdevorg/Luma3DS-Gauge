@@ -30,7 +30,8 @@
 
 #define BATTERY_THREAD_PRIORITY     58 // same as the task runner, lowest of Rosalina's threads
 #define BATTERY_THREAD_STACK_SIZE   0x1000
-#define BATTERY_BOOT_DELAY_MS       5000u
+#define BATTERY_BOOT_RETRY_MS       200u    // boot: SD readiness checked this often
+#define BATTERY_BOOT_MAX_WAIT_MS    30000u  // ... for at most this long
 #define BATTERY_WAKEUP_MS           1000u
 
 static MyThread g_recorderThread;
@@ -454,12 +455,16 @@ static void batteryRecorderTick(void)
 
 static void batteryRecorderThreadMain(void)
 {
-    // Give the SD card / FS some time after boot. Bail out early on shutdown.
-    if (svcWaitSynchronization(preTerminationEvent, BATTERY_BOOT_DELAY_MS * 1000000LL) == 0)
-        return;
+    // Wait until the SD card can be opened (no fixed delay; curve.bin is loaded by the LED thread).
+    // Bail out early on shutdown.
+    u64 startMs = batteryNowMs();
+    while (!BatteryFs_SdReady() && batteryNowMs() - startMs < BATTERY_BOOT_MAX_WAIT_MS)
+    {
+        if (svcWaitSynchronization(preTerminationEvent, BATTERY_BOOT_RETRY_MS * 1000000LL) == 0)
+            return;
+    }
 
-    BatteryCurve_Load(); // for the Status screen and the LED thread
-
+    // Under g_rec.lock: BatteryRecorder_Start (menu) can't interleave with the recovery
     LightLock_Lock(&g_rec.lock);
     if (!g_rec.recording) // else the user was faster than the boot delay and the state file is current
         batteryRecoverCutoffSessionLocked();

@@ -53,6 +53,8 @@ void BatterySessions_MakePath(char *out, u32 number);
 
 /// Creates /luma/battery and /luma/battery/sessions if missing.
 Result BatteryFs_EnsureDirs(void);
+/// True once the SD card archive can be opened (boot readiness check).
+bool BatteryFs_SdReady(void);
 /// Appends len bytes at the end of the file (created if missing), flushed, then closes it.
 Result BatteryFs_Append(const char *path, const void *data, u32 len);
 /// Replaces the whole file content.

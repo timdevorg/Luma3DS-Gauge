@@ -11,8 +11,12 @@
 *     BatteryMcu_SetPowerLedMode() (the only MCU write; reg 0x29, mode byte, whitelisted modes).
 *     It writes only when the desired mode changes, or to re-apply it after a mismatch
 *     (at most once per 250 ms).
-*   - Hands the LED back (mode 0, automatic) before sleep and on shutdown, from the notification
-*     thread, synchronously (BatteryLed_HandleNotification, called from main.c).
+*   - Keeps controlling while the adapter is plugged in (MCU table only, the level only gets better).
+*   - Lid closed / sleep requested: writes the sleep animation (2) if the LED is blue, keeps red /
+*     blinking red; shutdown: writes "power off" (3) once, then never writes again (BatteryLedGate).
+*     Both from the notification thread, synchronously (BatteryLed_HandleNotification, main.c).
+*   - Boot: starts as soon as the SD card can be opened (config.ini, curve.bin) and mcu::HWC answers,
+*     checking every 200 ms instead of waiting a fixed time.
 *   - Never writes anything unless the override has been switched on (default off), or the
 *     LED test screen is used. "Automatic" is only written to undo our own earlier write.
 *
@@ -32,7 +36,9 @@
 
 #define BATTERY_LED_THREAD_PRIORITY     56      // above the recorder / task runner (58), below the menu (52)
 #define BATTERY_LED_THREAD_STACK_SIZE   0x800   // shallow call tree, no string formatting
-#define BATTERY_LED_BOOT_DELAY_MS       6000u   // after the recorder thread has loaded curve.bin (5 s)
+#define BATTERY_LED_BOOT_RETRY_MS       200u    // boot: SD / mcu::HWC readiness checked this often
+#define BATTERY_LED_BOOT_MAX_WAIT_MS    30000u  // boot: give up waiting for the SD after this (load defaults)
+#define BATTERY_LED_BOOT_FAST_MS        30000u  // boot: retry the first MCU read every 200 ms for this long
 
 #define BATTERY_LED_POLL_IDLE_MS        10000u  // override off: corrected % only
 #define BATTERY_LED_POLL_MS             1000u
@@ -73,6 +79,10 @@ static struct
     u8 shellOpenPolls;
     bool shuttingDown;
     bool testMode;
+    bool prevCharger;       // adapter / charging on the previous poll (voltage median reset on unplug)
+    BatteryLedGate gate;    // shutdown latch
+
+    u64 startMs, sdReadyMs, firstDataMs, firstWriteMs; // boot timing (ms since the tick counter started)
 
     u8 desired, reason;
     u64 lastAttemptMs;
@@ -100,12 +110,17 @@ static u64 batteryLedNowMs(void)
 
 static bool batteryLedWriteLocked(u8 mode, u64 nowMs)
 {
+    if (!BatteryLedGate_Allow(&g_led.gate, mode))
+        return false; // after the first shutdown signal: nothing (but the one "power off") is written
+
     g_led.lastAttemptMs = nowMs;
     Result res = BatteryMcu_SetPowerLedMode(mode);
     g_led.lastWriteRes = res;
     if (R_SUCCEEDED(res))
     {
         BatteryLedWatch_Written(&g_led.watch, mode, nowMs);
+        if (g_led.writes == 0)
+            g_led.firstWriteMs = nowMs;
         g_led.writes++;
         g_led.writeFailStreak = 0;
         return true;
@@ -117,12 +132,55 @@ static bool batteryLedWriteLocked(u8 mode, u64 nowMs)
     return false;
 }
 
-// Undo our own earlier write. Never writes if we haven't written anything this boot.
-static void batteryLedHandBackLocked(u64 nowMs)
+// Desired mode from the current state (g_led.lock held, g_led.haveData)
+static u8 batteryLedDecideLocked(void)
 {
-    u8 lw = g_led.watch.lastWritten;
-    if (lw != BATTERY_LED_MODE_AUTO && lw != BATTERY_LED_MODE_UNKNOWN)
-        batteryLedWriteLocked(BATTERY_LED_MODE_AUTO, nowMs);
+    BatteryLedInputs in;
+    in.override = g_led.cfg.override;
+    in.adapter = (g_led.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
+    in.charging = (g_led.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
+    in.shellClosed = g_led.shellClosed || g_led.sleepPending || !(g_led.flags & BATTERY_MCU_FLAG_SHELL_OPEN);
+    in.shuttingDown = g_led.shuttingDown || preTerminationRequested;
+    in.error = g_led.error != BATTERY_LED_ERR_NONE;
+    in.pct = g_led.pct;
+    in.corrected = g_led.corrected;
+    in.lastWritten = g_led.watch.lastWritten;
+
+    g_led.desired = BatteryLedLogic_Decide(&g_led.logic, &g_led.cfg, &in, &g_led.reason);
+    return g_led.desired;
+}
+
+// Lid closed / sleep requested (notification thread): apply the sleep mode now, before the system goes on.
+// Blue -> sleep animation (2); red / blinking red stay; nothing if we haven't written anything this boot.
+static void batteryLedSleepLocked(u64 nowMs)
+{
+    if (g_led.testMode || !g_led.haveData)
+        return; // the test screen closes on lid close; the thread applies the mode after it
+
+    u8 desired = batteryLedDecideLocked();
+    if (BatteryLedLogic_NeedsWrite(desired, g_led.watch.lastWritten))
+        batteryLedWriteLocked(desired, nowMs); // not rate limited: this is the last chance before sleep
+}
+
+// First shutdown signal (0x108, 0x2000 or thread exit): "power off" (3) once if we own the LED and the system
+// hasn't set it already, then the gate stays closed: no "automatic" afterwards that would override the
+// system's power-off indication. Later calls do nothing.
+static void batteryLedShutdownLocked(u64 nowMs)
+{
+    g_led.shuttingDown = true;
+    g_led.reason = BATTERY_LED_REASON_SHUTDOWN;
+    if (!BatteryLedGate_IsOpen(&g_led.gate))
+        return;
+
+    u8 lw = g_led.watch.lastWritten, readMode = 0;
+    bool readValid = false;
+    if (BatteryLedLogic_OwnsLed(lw))
+        readValid = R_SUCCEEDED(BatteryMcu_ReadRegister(BATTERY_MCU_REG_POWER_LED, &readMode, 1));
+
+    u8 mode = BatteryLedGate_Shutdown(&g_led.gate, lw, readValid, readMode);
+    g_led.desired = mode;
+    if (mode != BATTERY_LED_MODE_KEEP)
+        batteryLedWriteLocked(mode, nowMs);
 }
 
 static void batteryLedControlLocked(u64 nowMs, bool fresh)
@@ -148,26 +206,15 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
     else
         g_led.shellOpenPolls = 0;
 
-    BatteryLedInputs in;
-    in.override = g_led.cfg.override;
-    in.adapter = (g_led.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
-    in.charging = (g_led.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
-    in.shellClosed = g_led.shellClosed || g_led.sleepPending || !(g_led.flags & BATTERY_MCU_FLAG_SHELL_OPEN);
-    in.shuttingDown = g_led.shuttingDown || preTerminationRequested;
-    in.error = g_led.error != BATTERY_LED_ERR_NONE;
-    in.corrected = g_led.corrected;
-
-    u8 desired = BatteryLedLogic_Decide(&g_led.logic, &g_led.cfg, &in, &g_led.reason);
-    g_led.desired = desired;
-    if (!fresh)
-        return; // the MCU read failed: don't act on old data
+    u8 desired = batteryLedDecideLocked();
+    if (!fresh || desired == BATTERY_LED_MODE_KEEP)
+        return; // the MCU read failed (don't act on old data), or nothing to write (shutdown, lid closed)
 
     bool rateOk = nowMs - g_led.lastAttemptMs >= BATTERY_LED_MIN_WRITE_GAP_MS;
 
     if (desired == BATTERY_LED_MODE_AUTO)
     {
-        u8 lw = g_led.watch.lastWritten;
-        if (lw == BATTERY_LED_MODE_AUTO || lw == BATTERY_LED_MODE_UNKNOWN)
+        if (!BatteryLedLogic_NeedsWrite(desired, g_led.watch.lastWritten))
             return;
         if (g_led.error != BATTERY_LED_ERR_NONE)
         {
@@ -214,6 +261,12 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
 
 static u32 batteryLedIntervalLocked(u64 nowMs)
 {
+    if (!g_led.haveData && nowMs - g_led.sdReadyMs < BATTERY_LED_BOOT_FAST_MS)
+    {
+        g_led.fastPolling = false;
+        return BATTERY_LED_BOOT_RETRY_MS; // boot: take over as soon as mcu::HWC answers
+    }
+
     bool needsHandBack = g_led.watch.lastWritten != BATTERY_LED_MODE_AUTO && g_led.watch.lastWritten != BATTERY_LED_MODE_UNKNOWN;
     if (!g_led.cfg.override && !g_led.testMode && !needsHandBack)
     {
@@ -236,16 +289,25 @@ static void batteryLedPoll(void)
     bool fresh = R_SUCCEEDED(res);
     if (fresh)
     {
+        if (!g_led.haveData)
+            g_led.firstDataMs = nowMs;
         g_led.haveData = true;
         g_led.pct = s.pctInt + s.pctFrac / 256.0f;
         g_led.flags = s.flags;
+
+        bool charger = (s.flags & (BATTERY_MCU_FLAG_ADAPTER | BATTERY_MCU_FLAG_CHARGING)) != 0;
+        if (g_led.prevCharger && !charger)
+            BatteryLedSmoother_Init(&g_led.volt); // unplugged: drop the elevated charging voltages
+        g_led.prevCharger = charger;
+
         if (g_led.volt.count == 0 || nowMs >= g_led.nextVoltMs)
         {
             BatteryLedSmoother_Push(&g_led.volt, s.voltageRaw);
             g_led.nextVoltMs = nowMs + BATTERY_LED_VOLT_SAMPLE_MS;
         }
         g_led.voltSmoothed = BatteryLedSmoother_Median(&g_led.volt);
-        g_led.corrected = BatteryCurve_Corrected(g_led.pct, g_led.voltSmoothed);
+        // On the adapter the voltage is elevated: MCU table only (voltRaw 0), no voltage blend
+        g_led.corrected = BatteryCurve_Corrected(g_led.pct, charger ? 0.0f : g_led.voltSmoothed);
 
         g_led.obs.infoValid = s.infoValid;
         g_led.obs.red = s.info[0x0A];
@@ -366,6 +428,10 @@ void BatteryLed_GetStatus(BatteryLedStatus *out)
     out->lastMismatchPct = g_led.lastMismatchPct;
     out->error = g_led.error;
     out->fastPolling = g_led.fastPolling;
+    out->startMs = g_led.startMs;
+    out->sdReadyMs = g_led.sdReadyMs;
+    out->firstDataMs = g_led.firstDataMs;
+    out->firstWriteMs = g_led.firstWriteMs;
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -386,7 +452,7 @@ Result BatteryLed_TestSetMode(u8 mode)
 
     Result res = -3;
     LightLock_Lock(&g_led.lock);
-    if (g_led.testMode && !g_led.shuttingDown && !preTerminationRequested)
+    if (g_led.testMode && BatteryLedGate_IsOpen(&g_led.gate) && !preTerminationRequested)
         res = batteryLedWriteLocked(mode, batteryLedNowMs()) ? 0 : g_led.lastWriteRes;
     LightLock_Unlock(&g_led.lock);
     return res;
@@ -405,7 +471,7 @@ void BatteryLed_TestEnd(void)
 
 void BatteryLed_HandleNotification(u32 notificationId)
 {
-    bool handBack = false, kick = false;
+    bool sleep = false, kick = false;
     u64 nowMs = batteryLedNowMs();
 
     LightLock_Lock(&g_led.lock);
@@ -413,11 +479,11 @@ void BatteryLed_HandleNotification(u32 notificationId)
     {
         case NOTIF_SHELL_CLOSED:
             g_led.shellClosed = true;
-            handBack = true;
+            sleep = true;
             break;
         case PTMNOTIFID_SLEEP_REQUESTED:
             g_led.sleepPending = true;
-            handBack = true;
+            sleep = true;
             break;
         case NOTIF_SHELL_OPENED: // also fired at boot
             g_led.shellClosed = false;
@@ -437,20 +503,17 @@ void BatteryLed_HandleNotification(u32 notificationId)
             break;
         case PTMNOTIFID_SHUTDOWN:
         case NOTIF_PRE_TERMINATION:
-            g_led.shuttingDown = true;
-            handBack = true;
+            // Synchronous, before the system goes on: "power off" at the first signal, then nothing
+            batteryLedShutdownLocked(nowMs);
             kick = true;
             break;
         default:
             break;
     }
 
-    if (handBack)
-    {
-        // Synchronous, before the system goes on with sleep / power-off: its own LED animation must win
-        g_led.desired = BATTERY_LED_MODE_AUTO;
-        batteryLedHandBackLocked(nowMs);
-    }
+    // Synchronous, before the system goes on with sleep
+    if (sleep)
+        batteryLedSleepLocked(nowMs);
     LightLock_Unlock(&g_led.lock);
 
     if (kick)
@@ -461,9 +524,20 @@ void BatteryLed_HandleNotification(u32 notificationId)
 
 static void batteryLedThreadMain(void)
 {
-    if (svcWaitSynchronization(preTerminationEvent, BATTERY_LED_BOOT_DELAY_MS * 1000000LL) == 0)
-        return;
+    // Boot: no fixed delay. Rosalina starts before the SD card can be opened and before the mcu sysmodule
+    // registers mcu::HWC; check every 200 ms. The SD is needed for config.ini and curve.bin; mcu::HWC is
+    // waited for by the poll loop below (200 ms retries until the first read succeeds).
+    while (!BatteryFs_SdReady() && batteryLedNowMs() - g_led.startMs < BATTERY_LED_BOOT_MAX_WAIT_MS)
+    {
+        if (svcWaitSynchronization(preTerminationEvent, BATTERY_LED_BOOT_RETRY_MS * 1000000LL) == 0)
+            return; // nothing written this boot: nothing to undo
+    }
 
+    LightLock_Lock(&g_led.lock);
+    g_led.sdReadyMs = batteryLedNowMs();
+    LightLock_Unlock(&g_led.lock);
+
+    BatteryCurve_Load(); // for the LED, the Status screen and the recorder
     BatteryLed_EnsureConfigLoaded();
 
     Handle handles[2] = { preTerminationEvent, g_ledKick };
@@ -481,11 +555,9 @@ static void batteryLedThreadMain(void)
             break;
     }
 
+    // Normally already done by the notification hook (0x108 / 0x2000): then the gate is closed and this does nothing
     LightLock_Lock(&g_led.lock);
-    g_led.shuttingDown = true;
-    g_led.desired = BATTERY_LED_MODE_AUTO;
-    g_led.reason = BATTERY_LED_REASON_SHUTDOWN;
-    batteryLedHandBackLocked(batteryLedNowMs()); // normally already done by the notification hook
+    batteryLedShutdownLocked(batteryLedNowMs());
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -497,6 +569,8 @@ MyThread *BatteryLed_CreateThread(void)
     BatteryLedLogic_Init(&g_led.logic);
     BatteryLedWatch_Init(&g_led.watch);
     BatteryLedSmoother_Init(&g_led.volt);
+    BatteryLedGate_Init(&g_led.gate);
+    g_led.startMs = batteryLedNowMs();
     g_led.desired = BATTERY_LED_MODE_AUTO;
     g_led.reason = BATTERY_LED_REASON_NO_DATA;
     g_led.corrected = -1.0f;

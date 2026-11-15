@@ -44,6 +44,15 @@ Result BatteryFs_EnsureDirs(void)
     return res;
 }
 
+bool BatteryFs_SdReady(void)
+{
+    FS_Archive archive;
+    if (R_FAILED(FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""))))
+        return false;
+    FSUSER_CloseArchive(archive);
+    return true;
+}
+
 static Result batteryFsOpen(IFile *file, const char *path, u32 flags)
 {
     memset(file, 0, sizeof(*file));

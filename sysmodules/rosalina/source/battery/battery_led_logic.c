@@ -85,7 +85,9 @@ bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
 void BatteryLedLogic_Init(BatteryLedLogic *l)
 {
     l->level = BATTERY_LED_LEVEL_BLUE;
+    l->levelValid = false;
     l->reevaluate = false;
+    l->onCharger = false;
 }
 
 void BatteryLedLogic_Reevaluate(BatteryLedLogic *l)
@@ -113,20 +115,101 @@ u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level)
     }
 }
 
+u8 BatteryLedLogic_SleepModeForLevel(u8 level)
+{
+    // Blue: the sleep animation, as the system would show it. Red / blinking red are kept: the stock
+    // LED also shows low battery instead of the sleep animation, blinking uses less LED power than solid
+    // red, and switching blink -> solid red on every lid close would only be confusing.
+    switch (level)
+    {
+        case BATTERY_LED_LEVEL_BLINK:   return BATTERY_LED_MODE_BLINK;
+        case BATTERY_LED_LEVEL_RED:     return BATTERY_LED_MODE_RED;
+        default:                        return BATTERY_LED_MODE_SLEEP;
+    }
+}
+
+bool BatteryLedLogic_OwnsLed(u8 lastWritten)
+{
+    return lastWritten != BATTERY_LED_MODE_AUTO && lastWritten != BATTERY_LED_MODE_UNKNOWN &&
+           lastWritten != BATTERY_LED_MODE_POWER_OFF;
+}
+
+bool BatteryLedLogic_NeedsWrite(u8 desired, u8 lastWritten)
+{
+    if (desired == BATTERY_LED_MODE_KEEP)
+        return false;
+    if (desired == BATTERY_LED_MODE_AUTO)
+        return lastWritten != BATTERY_LED_MODE_AUTO && lastWritten != BATTERY_LED_MODE_UNKNOWN;
+    return desired != lastWritten;
+}
+
+// Discharging: the level only gets worse (voltage recovers when the load drops)
+static void batteryLedDischargeLevel(BatteryLedLogic *l, const BatteryLedConfig *cfg, float corrected)
+{
+    u8 fresh = batteryLedLevelFor(cfg, corrected, 0.0f);
+    if (!l->levelValid)
+    {
+        // Boot, or the adapter was just unplugged: start from the corrected % as it is
+        l->level = fresh;
+        l->levelValid = true;
+        l->reevaluate = false;
+        return;
+    }
+
+    if (l->reevaluate)
+    {
+        // After a settings change the LED may get better, with hysteresis
+        u8 hyst = batteryLedLevelFor(cfg, corrected, BATTERY_LED_HYSTERESIS);
+        if (hyst < l->level)
+            l->level = hyst;
+        l->reevaluate = false;
+    }
+
+    if (fresh > l->level)
+        l->level = fresh;
+}
+
+// On the adapter: the level only gets better (red -> blue), with hysteresis, never worse
+static void batteryLedChargeLevel(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in)
+{
+    if (!l->levelValid || l->reevaluate)
+    {
+        // Boot on the charger, or a settings change while charging: start from the corrected % as it is
+        l->level = batteryLedLevelFor(cfg, in->corrected, 0.0f);
+        l->levelValid = true;
+        l->reevaluate = false;
+    }
+    else
+    {
+        u8 hyst = batteryLedLevelFor(cfg, in->corrected, BATTERY_LED_HYSTERESIS);
+        if (hyst < l->level)
+            l->level = hyst;
+    }
+
+    if (in->adapter && !in->charging && in->pct >= BATTERY_LED_FULL_MCU_PCT)
+        l->level = BATTERY_LED_LEVEL_BLUE; // fully charged
+}
+
 u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in, u8 *outReason)
 {
     u8 reason;
     u8 mode = BATTERY_LED_MODE_AUTO;
+    bool charger = in->adapter || in->charging;
 
-    if (in->adapter || in->charging)
+    // Plugged in: the charge starts from the current level. Unplugged: a new discharge starts from the
+    // corrected % at that moment (the "only gets worse" ratchet restarts there).
+    if (charger != l->onCharger)
     {
-        // New discharge starts when the charger is unplugged again
-        l->level = BATTERY_LED_LEVEL_BLUE;
-        l->reevaluate = false;
-        reason = BATTERY_LED_REASON_CHARGER;
+        l->onCharger = charger;
+        if (!charger)
+            l->levelValid = false;
     }
-    else if (in->shuttingDown)
+
+    if (in->shuttingDown)
+    {
         reason = BATTERY_LED_REASON_SHUTDOWN;
+        mode = BATTERY_LED_MODE_KEEP; // the shutdown latch (BatteryLedGate) decides the one last write
+    }
     else if (in->error)
         reason = BATTERY_LED_REASON_ERROR;
     else if (!in->override)
@@ -135,25 +218,24 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
         reason = BATTERY_LED_REASON_NO_CURVE;
     else
     {
-        if (l->reevaluate)
-        {
-            // After a settings change the LED may get better, with hysteresis
-            u8 hyst = batteryLedLevelFor(cfg, in->corrected, BATTERY_LED_HYSTERESIS);
-            if (hyst < l->level)
-                l->level = hyst;
-            l->reevaluate = false;
-        }
-
-        // Within a discharge the level only gets worse (voltage recovers when the load drops)
-        u8 fresh = batteryLedLevelFor(cfg, in->corrected, 0.0f);
-        if (fresh > l->level)
-            l->level = fresh;
+        if (charger)
+            batteryLedChargeLevel(l, cfg, in);
+        else
+            batteryLedDischargeLevel(l, cfg, in->corrected);
 
         if (in->shellClosed)
-            reason = BATTERY_LED_REASON_SHELL; // sleep animation belongs to the system
+        {
+            reason = BATTERY_LED_REASON_SHELL;
+            // Never the first write of a boot, and never "automatic" (that would show the MCU's own
+            // low-battery blinking instead of a sleep indication)
+            if (in->lastWritten == BATTERY_LED_MODE_UNKNOWN || in->lastWritten == BATTERY_LED_MODE_AUTO)
+                mode = BATTERY_LED_MODE_KEEP;
+            else
+                mode = BatteryLedLogic_SleepModeForLevel(l->level);
+        }
         else
         {
-            reason = BATTERY_LED_REASON_ACTIVE;
+            reason = charger ? BATTERY_LED_REASON_CHARGER : BATTERY_LED_REASON_ACTIVE;
             mode = BatteryLedLogic_ModeForLevel(cfg, l->level);
         }
     }
@@ -161,6 +243,50 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
     if (outReason != NULL)
         *outReason = reason;
     return mode;
+}
+
+// ---- Shutdown latch ----
+
+void BatteryLedGate_Init(BatteryLedGate *g)
+{
+    g->state = BATTERY_LED_GATE_OPEN;
+}
+
+u8 BatteryLedGate_Shutdown(BatteryLedGate *g, u8 lastWritten, bool readValid, u8 readMode)
+{
+    if (g->state != BATTERY_LED_GATE_OPEN)
+        return BATTERY_LED_MODE_KEEP;
+
+    // Only if we own the LED; if the system has already set "power off", leave it alone
+    if (BatteryLedLogic_OwnsLed(lastWritten) && !(readValid && readMode == BATTERY_LED_MODE_POWER_OFF))
+    {
+        g->state = BATTERY_LED_GATE_LAST_WRITE;
+        return BATTERY_LED_MODE_POWER_OFF;
+    }
+
+    g->state = BATTERY_LED_GATE_CLOSED;
+    return BATTERY_LED_MODE_KEEP;
+}
+
+bool BatteryLedGate_Allow(BatteryLedGate *g, u8 mode)
+{
+    switch (g->state)
+    {
+        case BATTERY_LED_GATE_OPEN:
+            return true;
+        case BATTERY_LED_GATE_LAST_WRITE:
+            if (mode != BATTERY_LED_MODE_POWER_OFF)
+                return false;
+            g->state = BATTERY_LED_GATE_CLOSED; // used up, whether the write succeeds or not
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool BatteryLedGate_IsOpen(const BatteryLedGate *g)
+{
+    return g->state == BATTERY_LED_GATE_OPEN;
 }
 
 // ---- Mismatch detection ----
@@ -181,7 +307,9 @@ void BatteryLedWatch_Written(BatteryLedWatch *w, u8 mode, u64 nowMs)
 
 bool BatteryLedWatch_Mismatch(BatteryLedWatch *w, u8 desired, const BatteryLedObserved *o, u64 nowMs)
 {
-    if (desired == BATTERY_LED_MODE_AUTO || desired == BATTERY_LED_MODE_UNKNOWN || desired != w->lastWritten)
+    // Automatic, the sleep animation and "power off" belong to the system / fade by design: not watched
+    if (desired == BATTERY_LED_MODE_AUTO || desired == BATTERY_LED_MODE_SLEEP || desired == BATTERY_LED_MODE_POWER_OFF ||
+        desired == BATTERY_LED_MODE_KEEP || desired == BATTERY_LED_MODE_UNKNOWN || desired != w->lastWritten)
     {
         w->redOffStreak = 0;
         return false;
@@ -290,11 +418,12 @@ const char *BatteryLedLogic_ModeName(u8 mode)
     {
         case BATTERY_LED_MODE_AUTO:         return "auto";
         case BATTERY_LED_MODE_BLUE_FORCED:  return "blue(1)";
-        case 2:                             return "sleep";
-        case 3:                             return "power off";
+        case BATTERY_LED_MODE_SLEEP:        return "sleep";
+        case BATTERY_LED_MODE_POWER_OFF:    return "power off";
         case BATTERY_LED_MODE_RED:          return "red";
         case BATTERY_LED_MODE_BLUE:         return "blue(5)";
         case BATTERY_LED_MODE_BLINK:        return "blink red";
+        case BATTERY_LED_MODE_KEEP:         return "keep";
         case BATTERY_LED_MODE_UNKNOWN:      return "none yet";
         default:                            return "other";
     }
@@ -307,7 +436,7 @@ const char *BatteryLedLogic_ReasonName(u8 reason)
         case BATTERY_LED_REASON_ACTIVE:     return "active";
         case BATTERY_LED_REASON_OFF:        return "override off";
         case BATTERY_LED_REASON_NO_CURVE:   return "no curve";
-        case BATTERY_LED_REASON_CHARGER:    return "charger";
+        case BATTERY_LED_REASON_CHARGER:    return "charging";
         case BATTERY_LED_REASON_SHELL:      return "lid closed";
         case BATTERY_LED_REASON_SHUTDOWN:   return "shutdown";
         case BATTERY_LED_REASON_ERROR:      return "error";

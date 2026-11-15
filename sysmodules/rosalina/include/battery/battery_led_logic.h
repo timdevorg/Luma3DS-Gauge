@@ -16,9 +16,12 @@
 // Power LED modes (reg 0x29). Same values as BATTERY_MCU_LED_* in battery_mcu.h.
 #define BATTERY_LED_MODE_AUTO           0
 #define BATTERY_LED_MODE_BLUE_FORCED    1
+#define BATTERY_LED_MODE_SLEEP          2   // sleep animation (lid closed, LED was blue)
+#define BATTERY_LED_MODE_POWER_OFF      3   // "power off" mode (shutdown, written at most once)
 #define BATTERY_LED_MODE_RED            4
 #define BATTERY_LED_MODE_BLUE           5
 #define BATTERY_LED_MODE_BLINK          6
+#define BATTERY_LED_MODE_KEEP           0xFE // desired: write nothing, leave the LED as it is
 #define BATTERY_LED_MODE_UNKNOWN        0xFF // nothing written yet this boot
 
 #define BATTERY_LED_HYSTERESIS          0.5f  // points above a threshold needed for the LED to get better
@@ -27,6 +30,7 @@
 #define BATTERY_LED_RED_OFF_POLLS       2     // solid red: red LED off this many polls in a row = mismatch
 #define BATTERY_LED_VOLT_WINDOW         6     // voltage median over this many samples
 #define BATTERY_LED_VOLT_SAMPLE_MS      10000u // one voltage sample every 10 s (window ~1 min, like the curve)
+#define BATTERY_LED_FULL_MCU_PCT        95.0f // adapter in, not charging, MCU >= this: fully charged -> blue
 
 // Defaults and limits of the settings (config.ini)
 #define BATTERY_LED_DEFAULT_RED_PCT     10
@@ -55,9 +59,9 @@ typedef enum BatteryLedReason
     BATTERY_LED_REASON_ACTIVE = 0,  // override on, LED set from the corrected %
     BATTERY_LED_REASON_OFF,         // override off
     BATTERY_LED_REASON_NO_CURVE,
-    BATTERY_LED_REASON_CHARGER,     // adapter plugged in / charging
-    BATTERY_LED_REASON_SHELL,       // lid closed / going to sleep
-    BATTERY_LED_REASON_SHUTDOWN,
+    BATTERY_LED_REASON_CHARGER,     // adapter plugged in / charging: LED set from the MCU table, only gets better
+    BATTERY_LED_REASON_SHELL,       // lid closed / going to sleep: sleep animation (blue) or red kept
+    BATTERY_LED_REASON_SHUTDOWN,    // shutdown: "power off" written once (if we owned the LED), then never again
     BATTERY_LED_REASON_ERROR,       // gave up (write failures / MCU keeps overriding)
     BATTERY_LED_REASON_NO_DATA,     // no MCU reading yet
     BATTERY_LED_REASON_TEST,        // LED test screen in control
@@ -69,17 +73,36 @@ typedef struct BatteryLedInputs
     bool adapter;       // 0x0F bit3
     bool charging;      // 0x0F bit4
     bool shellClosed;   // notification 0x214 / sleep requested / 0x0F bit1 clear
-    bool shuttingDown;  // pre-termination
+    bool shuttingDown;  // shutdown signal seen / pre-termination
     bool error;         // control gave up
-    float corrected;    // BatteryCurve_Corrected(), < 0 if no curve
+    float pct;          // MCU % (for "fully charged")
+    float corrected;    // < 0 if no curve. Discharging: BatteryCurve_Corrected(pct, median voltage);
+                        // on the adapter: MCU table only (charging voltage is elevated)
+    u8 lastWritten;     // BatteryLedWatch.lastWritten (sleep: nothing is written if we haven't written before)
 } BatteryLedInputs;
 
-/// Discharge state: the level only gets worse during one discharge.
+/// Level state: during one discharge the level only gets worse, during one charge only better.
 typedef struct BatteryLedLogic
 {
     u8 level;           // BatteryLedLevel
+    bool levelValid;    // false: the next decision takes the level from the corrected % as it is
     bool reevaluate;    // next decision may make the level better (with hysteresis)
+    bool onCharger;     // adapter / charging seen on the last decision
 } BatteryLedLogic;
+
+/// One-way shutdown latch. The first shutdown signal may write "power off" (3) once; after that
+/// nothing is written any more this boot (no "automatic" from pre-termination / thread exit / menu).
+typedef enum BatteryLedGateState
+{
+    BATTERY_LED_GATE_OPEN = 0,      // normal operation
+    BATTERY_LED_GATE_LAST_WRITE,    // shutdown: exactly one write of BATTERY_LED_MODE_POWER_OFF allowed
+    BATTERY_LED_GATE_CLOSED,        // shutdown: no writes at all
+} BatteryLedGateState;
+
+typedef struct BatteryLedGate
+{
+    u8 state;           // BatteryLedGateState
+} BatteryLedGate;
 
 /// Mismatch detection state (actual LED vs desired mode).
 typedef struct BatteryLedWatch
@@ -129,11 +152,29 @@ void BatteryLedLogic_Reevaluate(BatteryLedLogic *l);
 u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const BatteryLedInputs *in, u8 *outReason);
 /// Mode for a level.
 u8 BatteryLedLogic_ModeForLevel(const BatteryLedConfig *cfg, u8 level);
+/// Mode while the lid is closed / sleeping: blue -> sleep animation (2), red / blinking red kept (4 / 6).
+u8 BatteryLedLogic_SleepModeForLevel(u8 level);
+/// True if lastWritten is a mode we put on the LED (not automatic, nothing yet, or "power off").
+bool BatteryLedLogic_OwnsLed(u8 lastWritten);
+/// Whether a desired mode has to be written now (KEEP: never; automatic: only to undo our own write;
+/// else: when it differs from the last written mode).
+bool BatteryLedLogic_NeedsWrite(u8 desired, u8 lastWritten);
+
+void BatteryLedGate_Init(BatteryLedGate *g);
+/// A shutdown signal (0x108, 0x2000, thread exit). Only the first call can return BATTERY_LED_MODE_POWER_OFF:
+/// if we own the LED (lastWritten) and reg 0x29 doesn't already read 3 (readValid / readMode). Every other
+/// call returns BATTERY_LED_MODE_KEEP. The gate is closed afterwards.
+u8 BatteryLedGate_Shutdown(BatteryLedGate *g, u8 lastWritten, bool readValid, u8 readMode);
+/// Ask before every MCU write. True while open; after Shutdown returned POWER_OFF exactly one write of
+/// POWER_OFF is allowed; false for everything else once a shutdown signal has been seen.
+bool BatteryLedGate_Allow(BatteryLedGate *g, u8 mode);
+bool BatteryLedGate_IsOpen(const BatteryLedGate *g);
 
 void BatteryLedWatch_Init(BatteryLedWatch *w);
 /// Call after every successful write.
 void BatteryLedWatch_Written(BatteryLedWatch *w, u8 mode, u64 nowMs);
-/// True if the LED doesn't show what we wrote (desired == lastWritten, not automatic, grace period over).
+/// True if the LED doesn't show what we wrote (desired == lastWritten, not automatic / sleep / power off /
+/// keep, grace period over).
 bool BatteryLedWatch_Mismatch(BatteryLedWatch *w, u8 desired, const BatteryLedObserved *o, u64 nowMs);
 
 void BatteryLedSmoother_Init(BatteryLedSmoother *s);

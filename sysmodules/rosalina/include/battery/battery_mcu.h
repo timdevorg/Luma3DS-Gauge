@@ -24,14 +24,16 @@
 // Power LED modes (reg 0x29, mode byte). Only these may ever be written (BatteryMcu_SetPowerLedMode).
 #define BATTERY_MCU_LED_AUTO            0 // "anything else = automatic mode" (3dbrew)
 #define BATTERY_MCU_LED_BLUE_FORCED     1 // forced default blue
+#define BATTERY_MCU_LED_SLEEP           2 // sleep mode animation
+#define BATTERY_MCU_LED_POWER_OFF       3 // "power off" mode
 #define BATTERY_MCU_LED_RED             4 // blue off, red on
 #define BATTERY_MCU_LED_BLUE            5 // red off, blue on
 #define BATTERY_MCU_LED_BLINK_RED       6 // animate blue off, flash red
 
+/// Whitelist: the modes 3dbrew documents for reg 0x29 (0..6). Anything else is refused.
 static inline bool BatteryMcu_LedModeAllowed(u32 mode)
 {
-    return mode == BATTERY_MCU_LED_AUTO || mode == BATTERY_MCU_LED_BLUE_FORCED || mode == BATTERY_MCU_LED_RED ||
-           mode == BATTERY_MCU_LED_BLUE || mode == BATTERY_MCU_LED_BLINK_RED;
+    return mode <= BATTERY_MCU_LED_BLINK_RED;
 }
 
 typedef struct BatteryMcuSample

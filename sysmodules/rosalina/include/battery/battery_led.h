@@ -47,6 +47,10 @@ typedef struct BatteryLedStatus
     float lastMismatchPct;  // MCU % at the last mismatch
     u8 error;               // BatteryLedError
     bool fastPolling;
+    u64 startMs;            // boot timing, ms since the ARM11 tick counter started (~power-on):
+    u64 sdReadyMs;          //   LED thread created / SD usable / first MCU read / first write (0 = not yet)
+    u64 firstDataMs;
+    u64 firstWriteMs;
 } BatteryLedStatus;
 
 /// Creates the LED thread (call once from the recorder's creation, before the service manager runs).
@@ -54,7 +58,8 @@ MyThread *BatteryLed_CreateThread(void);
 
 /// Rosalina notification hook (main.c): shell open/close (0x213/0x214), sleep (0x101/0x102/0x106),
 /// battery low (0x211/0x212), shutdown (0x108) and pre-termination (0x2000). Runs in the
-/// notification thread; writes "automatic" synchronously before sleep / shutdown when needed.
+/// notification thread; synchronously writes the sleep animation before sleep (if the LED is blue and
+/// ours) and "power off" once at the first shutdown signal (if the LED is ours), then nothing more.
 void BatteryLed_HandleNotification(u32 notificationId);
 
 void BatteryLed_GetStatus(BatteryLedStatus *out);
@@ -66,7 +71,7 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *cfg);
 
 /// LED test screen: the thread stops controlling the LED until BatteryLed_TestEnd().
 void BatteryLed_TestBegin(void);
-/// Writes a whitelisted mode (0/1/4/5/6) while the test is active.
+/// Writes a whitelisted mode (0..6) while the test is active.
 Result BatteryLed_TestSetMode(u8 mode);
 /// Gives control back; the thread re-applies the normal mode (or automatic) right away.
 void BatteryLed_TestEnd(void);
