@@ -29,8 +29,8 @@
 *     LED test screen is used. "Automatic" is only written to undo our own earlier write.
 *   - ptm battery bars (section 15, independent of the LED override): after each poll the HOME Menu battery level
 *     is decided from the corrected % (BatteryBars_Decide: the red / blink steps from this LED level state) and put
-*     into ptm's two level copies when it changes (battery_ptm_patch.c, verified); stock while charging, without a
-*     curve, with MCU read errors or with the setting off. Also at boot after the first MCU read and after every
+*     into ptm's two level copies when it changes (battery_ptm_patch.c, verified); while charging the level fed before
+*     is held (not stock); stock without a curve, with MCU read errors or with the setting off. Also at boot after the first MCU read and after every
 *     settings change (the thread is kicked and applies it at its next poll).
 *
 *   Design: docs/battery-manager.md, section 12.

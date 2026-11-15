@@ -16,8 +16,8 @@ red only appear when the battery is actually low.
 > corrected level. The sleep byte at a blue level (13.10), the red-level `04` / `04` and the stock blink case
 > (13.12) are **tested on hardware**; "charging = always blue" (13.3) is **not yet tested on hardware** (14.9).
 > [Section 15](#15-ptm-battery-bars-patch-milestone-5) adds a second, independent ptm patch (four verified bytes) so
-> that HOME Menu's battery bars follow the corrected % too (default on, stock while charging); **not yet tested on
-> hardware**.
+> that HOME Menu's battery bars follow the corrected % too (default on, level held while charging); **tested on
+> hardware** (15.11).
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -1494,8 +1494,9 @@ copy A                                       copy B
 Each window occurs exactly once in the 61440-byte dump, with bytes 8 / 12 in their whitelists and also with both
 ignored altogether (host test, 15.8).
 
-The low-battery notifications (`0x211` / `0x212`) and the shutdown path don't use this level: they come from the
-MCU's own interrupts / %, so this patch doesn't change them (15.10).
+The MCU interrupt notifications (`0x211` / `0x212`) and the shutdown path don't use this level: they come from the
+MCU's own interrupts / %. HOME Menu's "battery running low" notification, however, follows this level (found on
+the device, 15.11), so with the patch it follows the corrected % (15.10).
 
 ### 15.2 The patch
 
@@ -1530,7 +1531,8 @@ Level 0 is **never** written.
 | setting `bars = 0` (stock) | `3C` / `05` | stock | ptm's own mapping |
 | no MCU reading yet, or the last 3 MCU reads failed | stock | stock | |
 | no curve | stock | stock | |
-| charger connected or charging (the LED's debounced `onCharger`, 13.3) | stock | stock | |
+| charger connected or charging (the LED's debounced `onCharger`, 13.3), a level fed before | unchanged | held | the level before charging |
+| same, nothing fed yet this boot (e.g. booted on the charger) | `00` / L | from the rows below, then held | |
 | LED level **blinking** (c ≤ `blink_pct`, default 3) | `00` / `01` | 1 | blinking red bar |
 | LED level **red** (c ≤ `red_pct`, default 10) | `00` / `02` | 2 | 1 red bar |
 | c ≥ `bars_4` (default 70) | `00` / `05` | 5 | 4 bars |
@@ -1547,8 +1549,15 @@ Level 0 is **never** written.
 - **3 / 4 / 5: 1 point of hysteresis.** Down as soon as c < threshold; up again only at c ≥ threshold + 1 (e.g.
   4 → 3 at 39.9, back to 4 at 41.0). Not ratcheted: the corrected % above red hardly moves back up anyway.
 - From stock (boot, unplugged, setting switched on) the level is taken fresh, without hysteresis.
-- **Charging = stock.** The curve is for discharge, and 3dbrew notes the level is only reliable without external
-  power. After unplugging, the bars return to corrected after the LED's ~3 s debounce (3 decisions).
+- **Charging = held** (changed after the first on-device test). While on the charger, and through the LED's unplug
+  debounce (3 decisions, ~3 s), the level fed before charging is kept: no stock bytes. If nothing was fed yet this
+  boot (booted on the charger, setting switched on, after MCU errors), the level is computed once from the
+  corrected % as usual and then held. It is not raised while charging: the curve is for discharge (3dbrew: the
+  level is only reliable without external power), and holding needs no extra state (`prev` is the held level).
+  After the debounce the normal logic runs (fresh, red / blink from the LED's level state, which restarts at the
+  unplug). **Why:** with "charging = stock", ptm used its own mapping during the debounce plus up to one ~8 s tick
+  after unplugging; at MCU 3.6 % that showed 1 blinking red bar and HOME Menu's low-battery notification before the
+  corrected bars came back.
 - **MCU read errors**: one failed poll changes nothing; 3 in a row → stock until a read succeeds.
 
 **When it is applied** (only from the LED thread; `BatteryBars_Apply` maps nothing if the bytes are already right):
@@ -1620,7 +1629,8 @@ to make room):
 
 ```
 bars patch: fed L=3 (shared 3), writes 4
-bars patch: stock (charging), shared 5, writes 6       (also: off, no curve, no data, MCU err)
+bars patch: fed L=3 (charging, held, shared 3), writes 4
+bars patch: stock (off), shared 5, writes 6             (also: no curve, no data, MCU err)
 bars patch: not checked yet, shared 5
 bars patch: off: mismatch (A)                           (also: (B), (A+B))
 bars patch: off: title id 00040130xxxx2202
@@ -1674,8 +1684,9 @@ way to measure the tick latency on the device. `writes` counts byte writes this 
   no data) against an independent statement of the table; never 0 when fed; the LED level overrides c for red /
   blink; the 1-point hysteresis (down at once, up at +1, no flapping when c wobbles around 40); through
   `BatteryLedLogic_Decide` like `battery_led.c`, with the override on **and off**: red / blink bars at the same poll
-  as the LED's red / blinking, exactly 4 one-step changes per discharge, stock while charging, the unplug debounce,
-  setting off / on, no curve.
+  as the LED's red / blinking, exactly 4 one-step changes per discharge, the level held (1..5, never stock) while
+  charging and through the unplug debounce (plug in at 3 → 3 at every poll, unplug → 3, no 1 / 2), boot on the
+  charger → fed from the corrected % then held, setting off while charging → stock, no curve.
 - **Model** of both ptm functions for % 0..255 × cmp {`3C`, `00`} × movs `01`..`05` and every step of the three
   write orders: always 0..5, % 0 → 0, stock bytes → stock mapping, fed → L. With the dump, a small Thumb interpreter
   runs ptm's **own** instructions from the `cmp` to the store with the patched immediates: agrees with the model in
@@ -1715,8 +1726,8 @@ corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off
 2. **Red bar with the red LED.** Raise `red_pct` above c (or wait for a real red level): the LED goes red and Status
    shows `fed L=2` at the same time; HOME Menu then shows 1 red bar. Same for blinking with `blink_pct` above c
    (`L=1`, blinking bar). Lower the thresholds again: back with the LED's 0.5-point hysteresis.
-3. **Charging → stock.** Plug in: `stock (charging)` within a poll, HOME Menu back to ptm's own level (and its
-   charging icon). Unplug: back to `fed` after ~3 s.
+3. **Charging → held.** Plug in: `fed L=x (charging, held, ...)` within a poll, same bars (with HOME Menu's charging
+   icon). Unplug at a low MCU %: no red bar and no low-battery notification; `fed L=x` after ~3 s.
 4. **Setting off → stock.** Menu `Battery bars` → `stock`: `stock (off)`, `shared` back to the stock level after the
    next tick; on again → `fed`.
 5. **Tick latency.** After a change (e.g. step 1 with a threshold edit), time how long Status shows
@@ -1725,12 +1736,24 @@ corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off
 
 ### 15.10 Known limitations
 
-- **System low-battery warnings still come from the MCU.** The "battery low" / "very low" notifications
-  (`0x212` / `0x211`) and the shutdown path don't use this level: they fire around **MCU 10 % / 5 %**, which on this
-  battery is about **33 % / 31 % real** (15.8: c 33.9 / 31.5). Apps / HOME Menu reacting to them are unaffected.
-- **The shared-page byte only updates at ptm's tick** (and at init / wake). HOME Menu is expected to read that byte
-  (not verified; it may also call GetBatteryLevel), so the icon may lag the patch by up to one tick (to be measured, 15.9 step 5). GetBatteryLevel (copy B) answers at once.
+- **HOME Menu's low-battery notification follows the patched level** (on-device finding, 15.11): no warning at boot
+  at MCU 3.6 % with the bars fed L=3; raising `red_pct` (red bar) made it appear. So it now follows the corrected
+  level. ptm still publishes the raw MCU interrupt notifications `0x212` / `0x211` (around MCU 10 % / 5 %, about
+  33 % / 31 % real here, 15.8); what HOME Menu does with them on its own is unknown, but none was seen at boot at
+  MCU 3.6 %. Apps reacting to them directly are unaffected. The shutdown path is unchanged.
+- **The shared-page byte only updates at ptm's tick** (and at init / wake), measured at about **8 s**, so the icon
+  lags a change of the patch by up to ~8 s. GetBatteryLevel (copy B) answers at once.
 - **Apps that read the MCU directly** (mcu::HWC, e.g. Rosalina's footer MCU %, homebrew) still see the MCU %.
-- **Stock while charging**: the icon is ptm's own then, including its view of the charge level.
+- **Held while charging**: the bars show the level from before charging (not raised by the charge) until the
+  unplug debounce is over.
 - **At MCU 0 %** both copies still give level 0 (shutdown semantics), whatever the corrected % says.
 - The patch only knows the New 3DS ptm version analysed here; any other binary → `off: mismatch`, stock bars.
+
+### 15.11 On-device results
+
+- Status `bars patch: fed L=3 (shared 3)` at corrected 29.9 % (MCU 3.6 %); HOME Menu showed 2 blue bars.
+- ptm's tick / HOME Menu refresh: about 8 s.
+- HOME Menu's "battery running low" notification follows the bars level: none at boot at MCU 3.6 % with the patch;
+  red bars (raised `red_pct`) made it appear.
+- With "charging = stock", unplugging at MCU 3.6 % showed 1 blinking red bar and the low-battery notification
+  until the debounce and the next tick passed; hence "charging = held" (15.3).

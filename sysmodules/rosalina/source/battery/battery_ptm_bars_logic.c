@@ -61,11 +61,20 @@ u8 BatteryBars_Decide(const BatteryLedConfig *cfg, const BatteryBarsInputs *in, 
         reason = BATTERY_BARS_REASON_MCU_ERROR;
     else if (in->corrected < 0.0f)
         reason = BATTERY_BARS_REASON_NO_CURVE;
-    else if (in->onCharger)
-        reason = BATTERY_BARS_REASON_CHARGING; // the curve is for discharge; 3dbrew: level only reliable on battery
+    else if (in->onCharger && prev >= BATTERY_BARS_LEVEL_MIN && prev <= BATTERY_BARS_LEVEL_MAX)
+    {
+        // On the charger (and during the LED's unplug debounce): hold the level fed before charging. Going stock
+        // here made ptm show the raw MCU mapping right after unplugging (1 blinking red bar and HOME Menu's
+        // low-battery notification at a low MCU %) until the debounce and ptm's ~8 s tick passed. The curve is for
+        // discharge, so the level is not raised while charging either; after the debounce the normal logic runs.
+        reason = BATTERY_BARS_REASON_CHARGING;
+        level = prev;
+    }
     else
     {
-        reason = BATTERY_BARS_REASON_FED;
+        // Normal discharge logic; also on the charger when nothing was fed yet this boot (booted on the charger,
+        // bars switched on, after an MCU error): fed from the corrected % once, then held as above
+        reason = in->onCharger ? BATTERY_BARS_REASON_CHARGING : BATTERY_BARS_REASON_FED;
 
         // Red / blink steps: the LED's level state (same thresholds, "only gets worse" within a discharge, 0.5
         // hysteresis after settings changes), so the red bar and the red LED switch at the same poll. Without a

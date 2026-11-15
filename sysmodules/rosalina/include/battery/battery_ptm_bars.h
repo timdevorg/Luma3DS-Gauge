@@ -92,7 +92,7 @@ typedef enum BatteryBarsReason
     BATTERY_BARS_REASON_NO_DATA,    // no MCU reading yet
     BATTERY_BARS_REASON_MCU_ERROR,  // MCU reads failing
     BATTERY_BARS_REASON_NO_CURVE,
-    BATTERY_BARS_REASON_CHARGING,   // charger connected / charging (the LED's debounced state)
+    BATTERY_BARS_REASON_CHARGING,   // on the charger (the LED's debounced state): level held, not stock
 } BatteryBarsReason;
 
 typedef struct BatteryBarsInputs
@@ -137,8 +137,8 @@ typedef struct BatteryBarsStatus
 // ---- Pure (host-tested, battery_ptm_bars_logic.c) ----
 
 /// Level 1..5 for HOME Menu from the corrected %, or BATTERY_BARS_STOCK (0). prev: the level decided last time
-/// (for the 1-point hysteresis on bars_4 / bars_3). Stock with the setting off, no data, MCU errors, no curve,
-/// or on the charger. Else: LED level blink -> 1, red -> 2; blue -> 5 at c >= bars_4, 4 at c >= bars_3, else 3.
+/// (for the 1-point hysteresis on bars_4 / bars_3). Stock with the setting off, no data, MCU errors or no curve.
+/// On the charger (debounced onCharger): prev held if it is 1..5 (reason CHARGING), else computed as below. Else: LED level blink -> 1, red -> 2; blue -> 5 at c >= bars_4, 4 at c >= bars_3, else 3.
 /// Stepping up within 3..5 needs c >= threshold + BATTERY_BARS_HYSTERESIS; stepping down is immediate.
 /// *outReason may be NULL.
 u8 BatteryBars_Decide(const BatteryLedConfig *cfg, const BatteryBarsInputs *in, u8 prev, u8 *outReason);

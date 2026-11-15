@@ -100,12 +100,20 @@ static void testDecisionMatrix(void)
                                 expL = 0, expR = BATTERY_BARS_REASON_MCU_ERROR;
                             else if (!curve)
                                 expL = 0, expR = BATTERY_BARS_REASON_NO_CURVE;
-                            else if (charging)
-                                expL = 0, expR = BATTERY_BARS_REASON_CHARGING;
+                            else if (charging)  // nothing fed yet (prev stock): from the corrected % (boot on the charger)
+                                expL = expectedFresh(&cfg, c), expR = BATTERY_BARS_REASON_CHARGING;
                             else
                                 expL = expectedFresh(&cfg, c), expR = BATTERY_BARS_REASON_FED;
                             CHECK(L == expL && reason == expR);
-                            CHECK(L <= 5 && (reason == BATTERY_BARS_REASON_FED) == (L != 0)); // never 0 when fed
+                            CHECK(L <= 5 && (reason == BATTERY_BARS_REASON_FED || reason == BATTERY_BARS_REASON_CHARGING) == (L != 0));
+
+                            // On the charger a fed level is held whatever c / the LED level say
+                            if (expR == BATTERY_BARS_REASON_CHARGING)
+                                for (u8 p = 1; p <= 5; p++)
+                                {
+                                    u8 r2;
+                                    CHECK(BatteryBars_Decide(&cfg, &in, p, &r2) == p && r2 == BATTERY_BARS_REASON_CHARGING);
+                                }
 
                             // With the LED level given, the red / blink steps come from it whatever c says
                             if (expR == BATTERY_BARS_REASON_FED)
@@ -268,25 +276,57 @@ static void testWithLed(void)
         if (!override)
             CHECK(s.led == BATTERY_LED_MODE_AUTO && s.l.levelValid && s.l.level == BATTERY_LED_LEVEL_BLINK);
 
-        // Charger: stock at once; after unplugging stock until the LED's debounce says unplugged, then the
+        // Charger: the level fed before is held (never stock), through the LED's unplug debounce; then the
         // corrected level as it is (a new discharge)
         simPoll(&s, 2.0f, true, false);
-        CHECK(s.bars == BATTERY_BARS_STOCK);
+        CHECK(s.bars == 1);
         simPoll(&s, 50.0f, false, true);
-        CHECK(s.bars == BATTERY_BARS_STOCK);
+        CHECK(s.bars == 1);
         for (u32 k = 0; k + 1 < BATTERY_LED_UNPLUG_DECISIONS; k++)
         {
             simPoll(&s, 50.0f, false, false);
-            CHECK(s.bars == BATTERY_BARS_STOCK);
+            CHECK(s.bars == 1);
         }
         simPoll(&s, 50.0f, false, false);
         CHECK(s.bars == 4);
-        // A charging flag flickering for one poll: stock again (and the debounce starts over)
+        // A charging flag flickering for one poll: held at 4 (and the debounce starts over)
         simPoll(&s, 50.0f, false, true);
-        CHECK(s.bars == BATTERY_BARS_STOCK);
+        CHECK(s.bars == 4);
         for (u32 k = 0; k < BATTERY_LED_UNPLUG_DECISIONS; k++)
             simPoll(&s, 9.0f, false, false);
         CHECK(s.bars == 2); // unplugged at a red level: red bar, together with the red level
+        // Plug in at L=3, charge, unplug at the same corrected %: 3 at every poll, never stock / 1 / 2
+        s.bars = 3;
+        BatteryLedLogic_Init(&s.l);
+        simPoll(&s, 30.0f, false, false);
+        CHECK(s.bars == 3);
+        for (u32 k = 0; k < 20; k++)
+        {
+            simPoll(&s, 30.0f + k, k < 10, true);   // the corrected % read while charging is ignored
+            CHECK(s.bars == 3);
+        }
+        for (u32 k = 0; k < BATTERY_LED_UNPLUG_DECISIONS + 5; k++)
+        {
+            simPoll(&s, 29.9f, false, false);
+            CHECK(s.bars == 3);
+        }
+        // Boot on the charger: fed from the corrected % at the first poll, then held
+        {
+            Sim b = s;
+            BatteryLedLogic_Init(&b.l);
+            b.bars = BATTERY_BARS_STOCK;
+            simPoll(&b, 50.0f, true, true);
+            CHECK(b.bars == 4);
+            simPoll(&b, 80.0f, true, true);
+            CHECK(b.bars == 4);
+            // Setting off while charging: stock; on again: fed from the corrected % and held
+            b.cfg.bars = false;
+            simPoll(&b, 80.0f, true, true);
+            CHECK(b.bars == BATTERY_BARS_STOCK);
+            b.cfg.bars = true;
+            simPoll(&b, 80.0f, true, true);
+            CHECK(b.bars == 5);
+        }
         // Setting off -> stock, on again -> fresh level
         s.cfg.bars = false;
         simPoll(&s, 9.0f, false, false);
@@ -299,7 +339,7 @@ static void testWithLed(void)
         CHECK(s.bars == BATTERY_BARS_STOCK);
     }
     printf("bars with the LED logic: red / blink bars switch at the same poll as the LED (override on and off), "
-           "4 steps per discharge, stock while charging with the LED's unplug debounce\n");
+           "4 steps per discharge, level held (never stock) while charging and through the LED's unplug debounce\n");
 }
 
 // ---- 2. Model of ptm's two level functions ----

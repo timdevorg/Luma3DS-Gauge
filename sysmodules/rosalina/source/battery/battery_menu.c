@@ -241,10 +241,12 @@ void BatteryMenu_Status(void)
         else
             y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm patch: %s, writes %lu",
                                 ptmName, ptm.writes);
-        // ptm battery bars (section 15): "fed L=3 (shared 3)", "stock (charging), shared 5", "off: ...". "shared" is
+        // ptm battery bars (section 15): "fed L=3 (shared 3)", "fed L=3 (charging, held, shared 3)", "stock (off), shared 5", "off: ...". "shared" is
         // ptm's level in the shared page (0x1FF81085 bits 2..4, read only), updated at ptm's own timer tick
         u32 shared = (OS_SharedConfig->led_battery >> 2) & 7;
-        if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED)
+        if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED && led.barsReason == BATTERY_BARS_REASON_CHARGING)
+            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (charging, held, shared %lu), writes %lu", (u32)bars.movsCur, shared, bars.writes);
+        else if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED)
             y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (shared %lu), writes %lu", (u32)bars.movsCur, shared, bars.writes);
         else if (bars.state == BATTERY_BARS_STATE_OK)
             y = batteryMenuLine(y, COLOR_WHITE, "bars patch: stock (%s), shared %lu, writes %lu",
