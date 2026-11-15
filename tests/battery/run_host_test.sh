@@ -19,6 +19,10 @@
 #     host stubs, sd_host_test.c) treat v1 and v2 the same, and that BatteryCurve_Build with
 #     the sessions newest first gives the same curve.bin as build_curve.py
 #   - LED logic unit tests + replay of the sessions with that curve (led_host_test.c)
+# Always (with or without sessions):
+#   - ptm sleep LED patch: decision + verification unit tests (ptm_host_test.c). With the New 3DS ptm
+#     dump (GodMode9 "Extract .code" of 0004013020002202) also checks the pattern in the real code.
+#     PTM_CODE=<path> selects the dump; default sessions/ptm/0004013020002202.dec.code; SKIPPED if missing.
 #
 # GRAPH_OUT=<dir>: also renders the on-console graph (battery_graph.c) into
 # <dir>/graph_full.ppm, graph_zoom.ppm and graph_nocurve_full.ppm / _zoom.ppm (needs sessions).
@@ -33,7 +37,7 @@ OUT="${TMPDIR:-/tmp}/battery-host-test.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-case "${1:-}" in -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 if [ $# -eq 0 ] && [ -f "$REPO/sessions/0001.csv" ] && [ -f "$REPO/sessions/0002.csv" ]; then
     set -- "$REPO/sessions/0001.csv" "$REPO/sessions/0002.csv"
     echo "using $REPO/sessions/0001.csv and 0002.csv"
@@ -55,6 +59,12 @@ CC="${CC:-$(command -v clang || command -v cc)}"
     "$REPO/sysmodules/rosalina/source/battery/battery_curve_sd.c" \
     "$REPO/sysmodules/rosalina/source/battery/battery_sessions.c" "$HERE/sd_host_test.c" \
     -o "$OUT/sd_host_test"
+"$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror \
+    -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_led_logic.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_ptm_patch_logic.c" "$HERE/ptm_host_test.c" \
+    -o "$OUT/ptm_host_test"
+PTM_CODE="${PTM_CODE:-$REPO/sessions/ptm/0004013020002202.dec.code}"
 
 if [ $# -eq 0 ]; then
     echo "No session CSVs (sessions/0001.csv + 0002.csv not found, none given):"
@@ -64,6 +74,8 @@ if [ $# -eq 0 ]; then
     "$OUT/led_host_test" || status=1
     echo
     "$OUT/sd_host_test" "$OUT/sd_unit" || status=1
+    echo
+    "$OUT/ptm_host_test" "$PTM_CODE" || status=1
     echo
     [ $status -eq 0 ] && echo "PASS (unit tests only, replay skipped)" || echo "FAIL"
     exit $status
@@ -147,6 +159,8 @@ echo
 "$OUT/sd_host_test" "$OUT/sd1" "$OUT/sd2" "$OUT/py.bin" "${numbers[@]}" || status=1
 echo
 "$OUT/led_host_test" "$OUT/py.bin" "$@" || status=1
+echo
+"$OUT/ptm_host_test" "$PTM_CODE" || status=1
 echo
 
 if [ -n "${GRAPH_OUT:-}" ]; then
