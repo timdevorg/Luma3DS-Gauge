@@ -59,6 +59,15 @@ static Result batteryFsOpen(IFile *file, const char *path, u32 flags)
     return IFile_Open(file, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""), batteryPath(path), flags);
 }
 
+static bool batteryFsExists(const char *path)
+{
+    IFile file;
+    if (R_FAILED(batteryFsOpen(&file, path, FS_OPEN_READ)))
+        return false;
+    IFile_Close(&file);
+    return true;
+}
+
 Result BatteryFs_Append(const char *path, const void *data, u32 len)
 {
     IFile file;
@@ -74,7 +83,7 @@ Result BatteryFs_Append(const char *path, const void *data, u32 len)
         file.pos = size;
         res = IFile_Write(&file, &total, data, len, FS_WRITE_FLUSH);
         if (R_SUCCEEDED(res) && total != len)
-            res = -1;
+            res = BATTERY_FS_RES_SHORT_WRITE;
     }
 
     Result res2 = IFile_Close(&file);
@@ -93,6 +102,8 @@ Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len)
     res = IFile_SetSize(&file, 0);
     if (R_SUCCEEDED(res))
         res = IFile_Write(&file, &total, data, len, FS_WRITE_FLUSH);
+    if (R_SUCCEEDED(res) && total != len)
+        res = BATTERY_FS_RES_SHORT_WRITE; // e.g. SD full: a short tmp file must never replace the real one
 
     Result res2 = IFile_Close(&file);
     return R_FAILED(res) ? res : res2;
@@ -115,7 +126,17 @@ Result BatteryFs_WriteSafelyKeepOld(const char *path, const char *tmpPath, const
     {
         FSUSER_DeleteFile(archive, batteryPath(bakPath)); // may not exist
         if (R_FAILED(FSUSER_RenameFile(archive, batteryPath(path), archive, batteryPath(bakPath))))
-            FSUSER_DeleteFile(archive, batteryPath(path)); // no old file (or it can't be kept): replace as without a backup
+        {
+            // The rename fails if there is no old file (then replace as without a backup), but also if bakPath
+            // couldn't be deleted (read-only, a directory of that name): then the old file stays as it is, the
+            // new data isn't used and the caller gets an error (it would otherwise lose the file it says it kept)
+            if (batteryFsExists(path))
+            {
+                FSUSER_DeleteFile(archive, batteryPath(tmpPath));
+                FSUSER_CloseArchive(archive);
+                return BATTERY_FS_RES_OLD_NOT_KEPT;
+            }
+        }
     }
     else
         FSUSER_DeleteFile(archive, batteryPath(path)); // may not exist

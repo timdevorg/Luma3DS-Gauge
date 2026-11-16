@@ -15,6 +15,10 @@
 #define BATTERY_STATE_PATH      "/luma/battery/state"
 
 #define BATTERY_MAX_SESSION_NUMBER  9999
+
+// Battery Manager's own failure codes (FS results are kept as they are)
+#define BATTERY_FS_RES_SHORT_WRITE  ((Result)0xE8A0BA01) // fewer bytes written than asked (SD full?)
+#define BATTERY_FS_RES_OLD_NOT_KEPT ((Result)0xE8A0BA02) // WriteSafelyKeepOld: the backup can't be replaced, nothing changed
 #define BATTERY_SESSION_COMPLETE_START_X10  950 // "complete" needs a first sample at 95.0 % or more
 #define BATTERY_MAX_LISTED_SESSIONS 64
 
@@ -58,14 +62,15 @@ Result BatteryFs_EnsureDirs(void);
 bool BatteryFs_SdReady(void);
 /// Appends len bytes at the end of the file (created if missing), flushed, then closes it.
 Result BatteryFs_Append(const char *path, const void *data, u32 len);
-/// Replaces the whole file content.
+/// Replaces the whole file content. A short write is an error (BATTERY_FS_RES_SHORT_WRITE).
 Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len);
 /// Power-cut safe replace: writes tmpPath (flushed), deletes path, renames tmpPath to path.
 /// Readers should fall back to tmpPath if path is missing or invalid.
 Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len);
 /// Same, but keeps the old file: writes tmpPath (flushed), deletes bakPath, renames path to bakPath (if path can't be
-/// renamed, e.g. it doesn't exist, it is deleted as in WriteSafely), renames tmpPath to path. Nothing is touched if
-/// writing tmpPath fails. At any power cut there is a valid path or a valid tmpPath (like WriteSafely).
+/// renamed because it doesn't exist, it is replaced as in WriteSafely), renames tmpPath to path. Nothing is touched if
+/// writing tmpPath fails, or if path exists but can't be renamed to bakPath (bakPath can't be deleted): then tmpPath
+/// is removed and BATTERY_FS_RES_OLD_NOT_KEPT returned. At any power cut there is a valid path or a valid tmpPath (like WriteSafely).
 Result BatteryFs_WriteSafelyKeepOld(const char *path, const char *tmpPath, const char *bakPath, const void *data, u32 len);
 /// Reads up to len bytes ending at the end of the file (len bytes from offset size-len). Returns bytes read in *outLen.
 Result BatteryFs_ReadTail(const char *path, void *data, u32 len, u32 *outLen);

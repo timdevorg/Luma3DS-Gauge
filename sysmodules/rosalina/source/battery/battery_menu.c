@@ -972,6 +972,8 @@ static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r, bool h
         }
         else if (r->used == 0 && R_SUCCEEDED(r->res))
             y = batteryMenuLine(y, COLOR_RED, "No usable session: nothing written.");
+        else if (r->res == BATTERY_FS_RES_OLD_NOT_KEPT) // curve.bak can't be deleted: curve.bin is left as it was
+            y = batteryMenuLine(y, COLOR_RED, "curve.bak can't be replaced: nothing written.");
         else if (R_FAILED(r->res))
             y = batteryMenuLine(y, COLOR_RED, "SD error 0x%08lx: curve not written.", (u32)r->res);
         else
@@ -1489,6 +1491,8 @@ static void batteryMenuRestoreCurve(void)
     }
     else if (r == BATTERY_CURVE_RESTORE_NO_BACKUP)
         batteryMenuMessage(title, "curve.bak is missing or invalid.", "Nothing was changed.");
+    else if (r == BATTERY_CURVE_RESTORE_SD_ERROR && res == BATTERY_FS_RES_OLD_NOT_KEPT)
+        batteryMenuMessage(title, "curve.bak can't be replaced.", "Nothing was changed.");
     else if (r == BATTERY_CURVE_RESTORE_SD_ERROR)
     {
         sprintf(line, "SD error 0x%08lx.", (u32)res);

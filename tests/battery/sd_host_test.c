@@ -291,6 +291,21 @@ static void keepOldAndStartCheckTest(void)
     CHECK(fileIs(bin, "B22", 3) && fileIs(bak, "A1", 2) && !fileExists(tmp));
     CHECK(R_SUCCEEDED(BatteryFs_WriteSafelyKeepOld(bin, tmp, bak, "C333", 4))); // the older backup is replaced
     CHECK(fileIs(bin, "C333", 4) && fileIs(bak, "B22", 3) && !fileExists(tmp));
+    // F5: a backup that can't be deleted (here a non-empty directory of that name): the old file is kept, the new
+    // data isn't used, tmp is removed, and the caller is told
+    char d[1024], x[1024];
+    snprintf(d, sizeof(d), "%s/luma/battery/kd.bak", g_root);
+    snprintf(x, sizeof(x), "%s/x", d);
+    mkdir(d, 0755);
+    FILE *xf = fopen(x, "wb");
+    if (xf != NULL)
+        fclose(xf);
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafely("/luma/battery/kd.bin", "/luma/battery/kd.tmp", "OLD", 3)));
+    CHECK(BatteryFs_WriteSafelyKeepOld("/luma/battery/kd.bin", "/luma/battery/kd.tmp", "/luma/battery/kd.bak", "NEW", 3) ==
+          BATTERY_FS_RES_OLD_NOT_KEPT);
+    CHECK(fileIs("/luma/battery/kd.bin", "OLD", 3) && !fileExists("/luma/battery/kd.tmp"));
+    remove(x);
+    rmdir(d);
 
     CHECK(BatterySessions_StartCheck(950, false) == BATTERY_START_OK);
     CHECK(BatterySessions_StartCheck(1000, false) == BATTERY_START_OK);
