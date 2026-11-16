@@ -31,6 +31,7 @@
 #define BATTERY_LED_VOLT_WINDOW         6     // voltage median over this many samples
 #define BATTERY_LED_VOLT_SAMPLE_MS      10000u // one voltage sample every 10 s (window ~1 min, like the curve)
 #define BATTERY_LED_FULL_MCU_PCT        95.0f // adapter in, not charging, MCU >= this: fully charged -> blue
+#define BATTERY_LED_READ_FAIL_HANDBACK  3     // MCU reads failed in a row while we own the LED -> automatic once (R1)
 #define BATTERY_LED_UNPLUG_DECISIONS    3     // charger debounce: adapter and charging flag both clear on this many
                                               // decisions in a row (~3 s at 1 s polling) before "unplugged"
 
@@ -91,6 +92,8 @@ typedef struct BatteryLedInputs
     float corrected;    // < 0 if no curve. Discharging: BatteryCurve_Corrected(pct, median voltage);
                         // on the adapter: MCU table only (charging voltage is elevated)
     u8 lastWritten;     // BatteryLedWatch.lastWritten (sleep: nothing is written if we haven't written before)
+    bool stale;         // no new MCU sample behind this decision (read failed, sleep hook): the charger debounce
+                        // doesn't count it (C2)
 } BatteryLedInputs;
 
 /// Level state: during one discharge the level only gets worse, during one charge only better.
@@ -204,6 +207,12 @@ typedef enum BatterySetting
 bool BatteryLedConfig_Step(BatteryLedConfig *cfg, u8 setting, s32 dir);
 /// True if lastWritten is a mode we put on the LED (not automatic, nothing yet, or "power off").
 bool BatteryLedLogic_OwnsLed(u8 lastWritten);
+/// R1: true when the LED thread should hand the LED back to automatic (write 0 once) because the MCU reads keep
+/// failing: at least BATTERY_LED_READ_FAIL_HANDBACK failed reads in a row, we own the LED (lastWritten), no sleep
+/// pending (the thread writes nothing then), and not done yet in this failure streak (handedBack). Like the bars,
+/// which go stock after BATTERY_BARS_ERROR_POLLS failed reads: the MCU's own low-battery indication isn't
+/// suppressed while we can't see the battery. Normal control resumes with the next successful read.
+bool BatteryLedLogic_ReadFailHandBack(u8 readFailStreak, u8 lastWritten, bool sleepPending, bool handedBack);
 /// Whether a desired mode has to be written now (KEEP: never; automatic: only to undo our own write;
 /// else: when it differs from the last written mode).
 bool BatteryLedLogic_NeedsWrite(u8 desired, u8 lastWritten);

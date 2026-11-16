@@ -303,6 +303,12 @@ bool BatteryLedLogic_OwnsLed(u8 lastWritten)
            lastWritten != BATTERY_LED_MODE_POWER_OFF;
 }
 
+bool BatteryLedLogic_ReadFailHandBack(u8 readFailStreak, u8 lastWritten, bool sleepPending, bool handedBack)
+{
+    return readFailStreak >= BATTERY_LED_READ_FAIL_HANDBACK && BatteryLedLogic_OwnsLed(lastWritten) && !sleepPending &&
+           !handedBack;
+}
+
 bool BatteryLedLogic_NeedsWrite(u8 desired, u8 lastWritten)
 {
     if (desired == BATTERY_LED_MODE_KEEP)
@@ -368,16 +374,21 @@ u8 BatteryLedLogic_Decide(BatteryLedLogic *l, const BatteryLedConfig *cfg, const
     // decisions in a row with the adapter and the charging flag both clear, so a flickering charging flag can't
     // toggle the LED blue <-> red. On the debounced unplug a new discharge starts from the corrected % at that
     // moment (the "only gets worse" ratchet restarts there, in either direction).
-    if (in->adapter || in->charging)
+    // Only decisions on a new MCU sample count (C2): a stale one (failed read, sleep hook) would repeat old flags
+    // and could end the debounce without a real second "unplugged" sample.
+    if (!in->stale)
     {
-        l->onCharger = true;
-        l->chargerOffCount = 0;
-    }
-    else if (l->onCharger && ++l->chargerOffCount >= BATTERY_LED_UNPLUG_DECISIONS)
-    {
-        l->onCharger = false;
-        l->chargerOffCount = 0;
-        l->levelValid = false;
+        if (in->adapter || in->charging)
+        {
+            l->onCharger = true;
+            l->chargerOffCount = 0;
+        }
+        else if (l->onCharger && ++l->chargerOffCount >= BATTERY_LED_UNPLUG_DECISIONS)
+        {
+            l->onCharger = false;
+            l->chargerOffCount = 0;
+            l->levelValid = false;
+        }
     }
     bool charger = l->onCharger;
 

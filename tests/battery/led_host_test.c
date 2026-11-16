@@ -356,6 +356,7 @@ static void ftSleep(FakeThread *t, const BatteryLedConfig *cfg, float corrected,
     in.charging = charging;
     in.shellClosed = true;
     in.lastWritten = t->watch.lastWritten;
+    in.stale = true; // like batteryLedSleepLocked: no new sample behind the sleep hook's decision
     u8 reason;
     u8 desired = BatteryLedLogic_Decide(&t->logic, cfg, &in, &reason);
     u8 m = BatteryLedLogic_SleepWrite(desired, reason, BatteryLedLogic_SleepLevel(cfg, t->logic.level, charging),
@@ -568,6 +569,61 @@ static void unitTests(void)
         for (u32 k = 0; k + 1 < BATTERY_LED_UNPLUG_DECISIONS; k++)
             CHECK(decide(&l, &cfg, 8.0f) == BATTERY_LED_MODE_BLUE);
         CHECK(decideCharging(&l, &cfg, 8.0f, i & 1, 8.0f) == BATTERY_LED_MODE_BLUE);
+    }
+    // C2: decisions without a new MCU sample (failed read, sleep hook) don't count for the unplug debounce
+    BatteryLedLogic_Init(&l);
+    CHECK(decideCharging(&l, &cfg, 8.0f, true, 8.0f) == BATTERY_LED_MODE_BLUE);
+    in = inputs(8.0f);
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_BLUE);     // one real "unplugged" sample
+    in.stale = true;
+    for (u32 k = 0; k < 10; k++)
+        CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_BLUE && l.onCharger);
+    in.stale = false;
+    for (u32 k = 1; k + 1 < BATTERY_LED_UNPLUG_DECISIONS; k++)
+        CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_BLUE && l.onCharger);
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_RED && !l.onCharger); // fresh ones count
+    // A stale decision with the charger flags doesn't change anything either (they were counted when fresh)
+    in = inputs(8.0f);
+    in.adapter = true;
+    in.stale = true;
+    CHECK(BatteryLedLogic_Decide(&l, &cfg, &in, NULL) == BATTERY_LED_MODE_RED && !l.onCharger);
+    // R1: hand the LED back after BATTERY_LED_READ_FAIL_HANDBACK failed reads in a row, only if we own it, not while
+    // sleep is pending, once per failure streak
+    CHECK(BATTERY_LED_READ_FAIL_HANDBACK >= 1);
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK - 1, BATTERY_LED_MODE_BLUE, false, false));
+    CHECK(BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_BLUE, false, false));
+    CHECK(BatteryLedLogic_ReadFailHandBack(255, BATTERY_LED_MODE_RED, false, false));
+    CHECK(BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_BLUE_FORCED, false, false));
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_BLUE, false, true));
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_BLUE, true, false));
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_AUTO, false, false));
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_UNKNOWN, false, false));
+    CHECK(!BatteryLedLogic_ReadFailHandBack(BATTERY_LED_READ_FAIL_HANDBACK, BATTERY_LED_MODE_POWER_OFF, false, false));
+    // Sequence as in batteryLedControlLocked: 2 failures nothing, 3rd writes 0, more failures nothing, a good read
+    // resumes (desired blue != automatic -> write)
+    {
+        BatteryLedWatch w;
+        BatteryLedWatch_Init(&w);
+        BatteryLedWatch_Written(&w, BATTERY_LED_MODE_BLUE, 0);
+        u8 streak = 0;
+        bool handed = false;
+        u32 handBacks = 0;
+        for (u32 k = 0; k < 10; k++)
+        {
+            streak++;
+            if (BatteryLedLogic_ReadFailHandBack(streak, w.lastWritten, false, handed))
+            {
+                handed = true;
+                handBacks++;
+                CHECK(streak == BATTERY_LED_READ_FAIL_HANDBACK);
+                BatteryLedWatch_Written(&w, BATTERY_LED_MODE_AUTO, k);
+            }
+        }
+        CHECK(handBacks == 1 && w.lastWritten == BATTERY_LED_MODE_AUTO);
+        streak = 0;
+        handed = false; // good read
+        CHECK(BatteryLedLogic_ThreadAction(BATTERY_LED_MODE_BLUE, w.lastWritten, BATTERY_LED_REASON_ACTIVE, false) ==
+              BATTERY_LED_ACTION_WRITE);
     }
     // Unplugged (debounced): the discharge restarts from the corrected % at that moment, in either direction
     BatteryLedLogic_Init(&l);

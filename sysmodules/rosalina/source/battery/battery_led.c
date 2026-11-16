@@ -116,6 +116,7 @@ static struct
     bool barsForce;         // apply at the next poll even if the level didn't change (boot, settings change)
     u64 barsLastApplyMs;
     u8 readFailStreak;      // MCU reads failed in a row
+    bool readFailHandedBack; // R1: LED handed back to automatic in this failure streak (cleared by a good read)
 
     // Time remaining (section 17, read-only): fed by every successful poll
     BatteryEta eta;
@@ -170,9 +171,11 @@ static bool batteryLedWriteLocked(u8 mode, u64 nowMs)
     return false;
 }
 
-// Inputs of the decision from the current state (g_led.lock held, g_led.haveData)
+// Inputs of the decision from the current state (g_led.lock held, g_led.haveData). in->stale is set by the callers
+// that decide without a new sample.
 static void batteryLedInputsLocked(BatteryLedInputs *in)
 {
+    in->stale = false;
     in->override = g_led.cfg.override;
     in->adapter = (g_led.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
     in->charging = (g_led.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
@@ -184,11 +187,12 @@ static void batteryLedInputsLocked(BatteryLedInputs *in)
     in->lastWritten = g_led.watch.lastWritten;
 }
 
-// Desired mode from the current state (g_led.lock held, g_led.haveData)
-static u8 batteryLedDecideLocked(void)
+// Desired mode from the current state (g_led.lock held, g_led.haveData). fresh: this poll read a new MCU sample
+static u8 batteryLedDecideLocked(bool fresh)
 {
     BatteryLedInputs in;
     batteryLedInputsLocked(&in);
+    in.stale = !fresh;
     g_led.desired = BatteryLedLogic_Decide(&g_led.logic, &g_led.cfg, &in, &g_led.reason);
     return g_led.desired;
 }
@@ -206,6 +210,7 @@ static void batteryLedPtmPatchLocked(void)
         BatteryLedInputs in;
         batteryLedInputsLocked(&in);
         in.shellClosed = true;
+        in.stale = true;
         BatteryLedLogic tmp = g_led.logic;
         u8 reason;
         u8 mode = BatteryLedLogic_Decide(&tmp, &g_led.cfg, &in, &reason);
@@ -266,7 +271,7 @@ static void batteryLedSleepLocked(u64 nowMs, bool entering)
     if (!g_led.haveData)
         return;
 
-    u8 desired = batteryLedDecideLocked();
+    u8 desired = batteryLedDecideLocked(false); // no new sample: doesn't count for the charger debounce
     bool charger = g_led.logic.onCharger; // debounced, the same state Decide used just now
     u8 level = BatteryLedLogic_SleepLevel(&g_led.cfg, g_led.logic.level, charger);
     u8 mode = BatteryLedLogic_SleepWrite(desired, g_led.reason, level, g_led.watch.lastWritten, entering);
@@ -328,7 +333,7 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
     else if (fresh)
         g_led.sleepOpenPolls = 0;
 
-    u8 desired = batteryLedDecideLocked();
+    u8 desired = batteryLedDecideLocked(fresh);
 
     // Sleep diagnostics: the first fresh poll that is no longer "lid closed" records the 0x29 read-back of
     // this poll's sample, taken before this function writes anything after wake
@@ -338,8 +343,27 @@ static void batteryLedControlLocked(u64 nowMs, bool fresh)
         g_led.wakePending = false;
     }
 
-    if (!fresh || desired == BATTERY_LED_MODE_KEEP)
-        return; // the MCU read failed (don't act on old data), or nothing to write (shutdown, lid closed)
+    if (!fresh)
+    {
+        // The MCU read failed: don't act on old data. But after BATTERY_LED_READ_FAIL_HANDBACK failures in a row
+        // while we own the LED, hand it back to automatic once (R1), so the MCU's own low-battery red / blinking
+        // isn't hidden behind our last mode while we can't see the battery. A good read resumes normal control
+        // (desired != automatic -> written again).
+        if (BatteryLedLogic_ReadFailHandBack(g_led.readFailStreak, g_led.watch.lastWritten, g_led.sleepPending,
+                                             g_led.readFailHandedBack))
+        {
+            g_led.readFailHandedBack = true; // once per failure streak, whether the write works or not
+            batteryLedWriteLocked(BATTERY_LED_MODE_AUTO, nowMs);
+        }
+        if (g_led.readFailHandedBack)
+        {
+            g_led.desired = BATTERY_LED_MODE_AUTO;
+            g_led.reason = BATTERY_LED_REASON_NO_DATA;
+        }
+        return;
+    }
+    if (desired == BATTERY_LED_MODE_KEEP)
+        return; // nothing to write (shutdown, lid closed)
 
     bool rateOk = nowMs - g_led.lastAttemptMs >= BATTERY_LED_MIN_WRITE_GAP_MS;
 
@@ -474,6 +498,7 @@ static void batteryLedPoll(void)
         g_led.obs.modeValid = s.ledModeValid;
         g_led.obs.mode = s.ledMode;
         g_led.readFailStreak = 0;
+        g_led.readFailHandedBack = false;
     }
     else if (g_led.readFailStreak < 255)
         g_led.readFailStreak++;
