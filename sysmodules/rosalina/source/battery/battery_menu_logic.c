@@ -164,6 +164,15 @@ static void homeTimeLeft(BatteryHomeLine *line, const BatteryHomeInputs *in)
         case BATTERY_ETA_UNKNOWN:
             homeLine(line, BATTERY_TONE_INACTIVE, "Time left", "--", "(no steady drain)");
             break;
+        case BATTERY_ETA_PROVISIONAL: // after a wake: the rate from before, until 10 new minutes (17.7)
+            BatteryEta_Format(value, in->etaMinutes);
+            {
+                u32 n = strlen(value);
+                value[n] = '?';
+                value[n + 1] = 0;
+            }
+            homeLine(line, BATTERY_TONE_INACTIVE, "Time left", value, "(provisional)");
+            break;
         default: // no poll yet, or less than 10 minutes of samples
             homeLine(line, BATTERY_TONE_INACTIVE, "Time left", "calculating", "(10 min on battery)");
             break;

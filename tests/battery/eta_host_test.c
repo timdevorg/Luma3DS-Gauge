@@ -5,7 +5,8 @@
 *   Host test for the time-remaining estimate (sysmodules/rosalina/source/battery/battery_eta_logic.c, section 17):
 *   slope / remaining / format helpers, and BatteryEta_Update driven like the LED thread (1 s and 10 s polls):
 *   linear drain, noisy drain, too little data, flat / rising (slope >= 0), the 24 h clamp, the resets (charging with
-*   the debounced unplug, no curve, gap between polls, BatteryEta_Reset), the 31-sample buffer and u32 tick wrap.
+*   the debounced unplug, no curve, gap between polls, BatteryEta_Reset), the 31-sample buffer and u32 tick wrap; the
+*   provisional estimate after a wake / gap (kept rate, seed, discarded on charger / curve / no curve, 12 h age cap).
 *
 *   Usage: eta_host_test   (run through tests/battery/run_host_test.sh)
 */
@@ -48,6 +49,11 @@ int host_sprintf(char *buf, const char *fmt, ...)
     return r;
 }
 
+// Wall clock of a poll at tick t: the tick plus a skew that tests move forward to model a sleep during which the tick
+// counter may stand still (osGetTime keeps going)
+static u64 g_wallSkew = 1000000000ull;
+#define WALL(t) ((u64)(t) + g_wallSkew)
+
 static u32 g_rnd = 0x2468ace1u;
 static float noise(float amp) // uniform in [-amp, amp]
 {
@@ -73,7 +79,7 @@ static u32 drain(BatteryEta *e, u32 t0, u32 durMs, u32 stepMs, float pct0, float
     for (u32 d = 0; d <= durMs; d += stepMs, t += stepMs)
     {
         float p = pct0 - ratePerMin * (d / 60000.0f) + noiseAmp * noise(1.0f);
-        BatteryEta_Update(e, t, true, false, p < 0.0f ? 0.0f : p);
+        BatteryEta_Update(e, t, WALL(t), true, false, p < 0.0f ? 0.0f : p);
     }
     return t;
 }
@@ -190,7 +196,7 @@ static void testTooLittleAndFlat(void)
     // Too little data: 5 samples over 10 minutes (sparse polls 2.5 min apart, below the gap limit) -> calculating
     BatteryEta e = fresh();
     for (u32 i = 0; i < 5; i++)
-        BatteryEta_Update(&e, 1000 + i * 150000u, true, false, 80.0f - i);
+        BatteryEta_Update(&e, 1000 + i * 150000u, WALL(1000 + i * 150000u), true, false, 80.0f - i);
     CHECK(e.count == 5 && e.state == BATTERY_ETA_CALCULATING);
     // Many samples but under 10 minutes
     e = fresh();
@@ -228,7 +234,7 @@ static void testResets(void)
 
     // Charging (the caller passes the debounced charger state): emptied, "charging", nothing collected
     for (u32 i = 0; i < 120; i++, t += 1000)
-        BatteryEta_Update(&e, t, true, true, 85.0f);
+        BatteryEta_Update(&e, t, WALL(t), true, true, 85.0f);
     CHECK(e.state == BATTERY_ETA_CHARGING && e.count == 0 && !e.haveRate);
     // After the debounced unplug: starts fresh, calculating for 10 minutes again
     t = drain(&e, t, 5u * 60000u, 1000, 85.0f, 0.5f, 0.0f);
@@ -237,29 +243,165 @@ static void testResets(void)
     CHECK(e.state == BATTERY_ETA_OK);
 
     // No curve: emptied, "no curve"; with a curve again: calculating
-    BatteryEta_Update(&e, t, false, false, -1.0f);
+    BatteryEta_Update(&e, t, WALL(t), false, false, -1.0f);
     CHECK(e.state == BATTERY_ETA_NO_CURVE && e.count == 0);
     t += 1000;
-    BatteryEta_Update(&e, t, true, false, -1.0f); // curve flag but no corrected % yet
+    BatteryEta_Update(&e, t, WALL(t), true, false, -1.0f); // curve flag but no corrected % yet
     CHECK(e.state == BATTERY_ETA_NO_CURVE && e.count == 0);
     t += 1000;
-    BatteryEta_Update(&e, t, true, false, 60.0f);
+    BatteryEta_Update(&e, t, WALL(t), true, false, 60.0f);
     CHECK(e.state == BATTERY_ETA_CALCULATING && e.count == 1);
 
     // Gap between polls (sleep: the thread didn't run): emptied at the next poll
     t = drain(&e, t, 15u * 60000u, 1000, 60.0f, 0.5f, 0.0f);
     CHECK(e.state == BATTERY_ETA_OK);
     t += BATTERY_ETA_MAX_GAP_MS + 1;
-    BatteryEta_Update(&e, t, true, false, 50.0f);
-    CHECK(e.state == BATTERY_ETA_CALCULATING && e.count == 1);
+    BatteryEta_Update(&e, t, WALL(t), true, false, 50.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL && e.count == 1 && e.haveProv && !e.haveRate); // rate kept (17.7)
+    CHECK(e.resetReason == BATTERY_ETA_RESET_GAP);
     // 10 s polls (Power LED stock) are no gap
     t = drain(&e, t, 15u * 60000u, 10000, 50.0f, 0.5f, 0.0f);
     CHECK(e.state == BATTERY_ETA_OK);
 
     // Explicit reset (wake from sleep, curve reload): calculating, empty
     BatteryEta_Reset(&e);
-    CHECK(e.state == BATTERY_ETA_CALCULATING && e.count == 0 && !e.haveRate);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && e.count == 0 && !e.haveRate && !e.haveProv);
     printf("eta resets: charging + unplug, no curve, gap between polls, explicit reset OK\n");
+}
+
+// Polls a 30 min drain at 0.5 %/min from 80 % (1 s polls); returns the time after it
+static u32 settle(BatteryEta *e, u32 t0)
+{
+    u32 t = drain(e, t0, 30u * 60000u, 1000, 80.0f, 0.5f, 0.0f);
+    CHECK(e->state == BATTERY_ETA_OK && e->haveRate && fabsf(e->rate - 0.5f) < 0.01f);
+    return t;
+}
+
+static void testProvisional(void)
+{
+    // Wake: until the new window has 10 min / 6 samples, the current % at the kept rate, marked provisional
+    BatteryEta e = fresh();
+    u32 t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && e.count == 0 && e.haveProv && !e.haveRate);
+    g_wallSkew += 3600000ull; // slept 1 h (tick may not have moved)
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 50.0f); // no gap: the restart counts as the last poll
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL && e.minutes == 100 && e.resetReason == BATTERY_ETA_RESET_WAKE);
+    u16 first = e.minutes;
+    t = drain(&e, t, 9u * 60000u, 1000, 50.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL && e.minutes < first && abs((int)e.minutes - 91) <= 5);
+    BatteryEtaDiag d;
+    BatteryEta_GetDiag(&e, t, &d);
+    CHECK(d.haveProv && !d.haveRate && d.provAgeMin >= 60 && d.provAgeMin <= 71 && d.samples == 10 && d.haveSlope &&
+          d.spanMs == 9u * 60000u && d.resetReason == BATTERY_ETA_RESET_WAKE && d.resetAgeMs >= 9u * 60000u);
+    // Enough new data: normal, the kept rate seeds the smoothing (same load: still 0.5)
+    t = drain(&e, t, 61000, 1000, 50.0f - 0.5f * 9.0f - 0.5f / 60.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_OK && e.haveRate && !e.haveProv && fabsf(e.rate - 0.5f) < 0.01f);
+
+    // Seed: a new load of 1 %/min after the wake -> the first rate is halfway (0.75), then it follows the new load
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    t = drain(&e, t + 1000, 10u * 60000u, 1000, 60.0f, 1.0f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_OK && fabsf(e.rate - 0.75f) < 0.02f);
+    t = drain(&e, t, 30u * 60000u, 1000, 50.0f - 1.0f / 60.0f, 1.0f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_OK && fabsf(e.rate - 1.0f) < 0.05f);
+
+    // Gap between polls: the same, reason "gap"
+    e = fresh();
+    t = settle(&e, 1000);
+    t += BATTERY_ETA_MAX_GAP_MS + 1;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 40.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL && e.minutes == 80 && e.resetReason == BATTERY_ETA_RESET_GAP);
+    // Two wakes in a row before the new window is ready: the kept rate stays
+    t = drain(&e, t, 3u * 60000u, 1000, 40.0f, 0.5f, 0.0f);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 30.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL && e.minutes == 60);
+
+    // Charging, curve change, no curve: nothing kept, "calculating" afterwards
+    e = fresh();
+    t = settle(&e, 1000);
+    for (u32 i = 0; i < 10; i++, t += 1000)
+        BatteryEta_Update(&e, t, WALL(t), true, true, 70.0f);
+    CHECK(e.state == BATTERY_ETA_CHARGING && !e.haveProv && e.resetReason == BATTERY_ETA_RESET_CHARGER);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t); // a wake after charging has nothing to keep
+    t = drain(&e, t + 1000, 5u * 60000u, 1000, 70.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_CURVE, t);
+    t = drain(&e, t + 1000, 5u * 60000u, 1000, 50.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv && e.resetReason == BATTERY_ETA_RESET_CURVE);
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Update(&e, t, WALL(t), false, false, -1.0f);
+    CHECK(e.state == BATTERY_ETA_NO_CURVE && !e.haveProv && e.resetReason == BATTERY_ETA_RESET_NO_CURVE);
+    t = drain(&e, t + 1000, 5u * 60000u, 1000, 50.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+    // ... and a charger seen during the provisional phase drops the kept rate too
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    t = drain(&e, t + 1000, 2u * 60000u, 1000, 50.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL);
+    BatteryEta_Update(&e, t, WALL(t), true, true, 50.0f);
+    t = drain(&e, t + 1000, 2u * 60000u, 1000, 50.0f, 0.5f, 0.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+
+    // Age cap (wall clock): 11 h asleep -> provisional; 13 h -> dropped; repeated wakes add up
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    g_wallSkew += 11ull * 3600000ull;
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 50.0f);
+    CHECK(e.state == BATTERY_ETA_PROVISIONAL);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    g_wallSkew += 2ull * 3600000ull;
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 45.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+    t = drain(&e, t, 10u * 60000u + 1000, 1000, 45.0f, 0.5f, 0.0f); // then normal, without a seed
+    CHECK(e.state == BATTERY_ETA_OK && fabsf(e.rate - 0.5f) < 0.01f);
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    g_wallSkew += 13ull * 3600000ull;
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 50.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+    // A wall clock set back: not used
+    e = fresh();
+    t = settle(&e, 1000);
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    g_wallSkew -= 3600000ull;
+    t += 1000;
+    BatteryEta_Update(&e, t, WALL(t), true, false, 50.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && !e.haveProv);
+    // Provisional over 24 h at the kept rate: calculating, not a value
+    e = fresh();
+    drain(&e, 1000, 20u * 60000u, 1000, 80.0f, 0.065f, 0.0f); // ~1030 min
+    CHECK(e.state == BATTERY_ETA_OK);
+    t = 1000 + 21u * 60000u;
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_WAKE, t);
+    BatteryEta_Update(&e, t + 1000, WALL(t + 1000), true, false, 100.0f);
+    CHECK(e.state == BATTERY_ETA_CALCULATING && e.haveProv);
+
+    // Boot: the first restart before any poll is "boot", the first poll stamps it
+    e = fresh();
+    BatteryEta_Restart(&e, BATTERY_ETA_RESET_CURVE, 500);
+    CHECK(e.resetReason == BATTERY_ETA_RESET_BOOT && e.state == BATTERY_ETA_NO_DATA);
+    e = fresh();
+    BatteryEta_Update(&e, 7000, WALL(7000), true, false, 50.0f);
+    BatteryEta_GetDiag(&e, 67000, &d);
+    CHECK(d.haveReset && d.resetReason == BATTERY_ETA_RESET_BOOT && d.resetAgeMs == 60000 && d.samples == 1 && !d.haveSlope);
+    CHECK(strcmp(BatteryEta_ResetName(BATTERY_ETA_RESET_NO_CURVE), "no curve") == 0 &&
+          strcmp(BatteryEta_ResetName(BATTERY_ETA_RESET_WAKE), "wake") == 0 && strcmp(BatteryEta_ResetName(99), "boot") == 0);
+    printf("eta provisional: wake / gap keep the rate (10 min provisional, seed), charger / curve / no curve drop it, "
+           "12 h age cap OK\n");
 }
 
 static void testWrap(void)
@@ -279,6 +421,7 @@ int main(void)
     testNoisy();
     testTooLittleAndFlat();
     testResets();
+    testProvisional();
     testWrap();
     printf(g_failures == 0 ? "eta host test: OK\n" : "eta host test: %d FAILURES\n", g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -14,6 +14,7 @@
 #include <3ds/types.h>
 #include "MyThread.h"
 #include "battery/battery_led_logic.h"
+#include "battery/battery_eta_logic.h"
 
 #define BATTERY_CONFIG_PATH         "/luma/battery/config.ini"
 #define BATTERY_CONFIG_TMP_PATH     "/luma/battery/config.tmp"
@@ -58,7 +59,8 @@ typedef struct BatteryLedStatus
     u8 barsLevel;           // ptm battery bars (section 15): decided level 1..5, 0 = stock
     u8 barsReason;          //   BatteryBarsReason
     u8 etaState;            // time remaining (section 17): BatteryEtaState
-    u16 etaMinutes;         //   rounded minutes, valid in BATTERY_ETA_OK
+    u16 etaMinutes;         //   rounded minutes, valid in BATTERY_ETA_OK / BATTERY_ETA_PROVISIONAL
+    BatteryEtaDiag eta;     //   details for Diagnostics 4/4
 } BatteryLedStatus;
 
 /// Creates the LED thread (call once from the recorder's creation, before the service manager runs).

@@ -121,7 +121,7 @@ static struct
     // Time remaining (section 17, read-only): fed by every successful poll
     BatteryEta eta;
     u32 etaCurveGen;        // BatteryCurve_Generation at the last poll: a reload starts the estimate over
-    bool etaResetPending;   // woke from sleep: start over at the next poll
+    bool etaResetPending;   // woke from sleep: start over at the next poll (rate kept as provisional)
 
     u8 desired, reason;
     u64 lastAttemptMs;
@@ -437,21 +437,27 @@ static u32 batteryLedIntervalLocked(u64 nowMs)
     return g_led.fastPolling ? BATTERY_LED_POLL_FAST_MS : BATTERY_LED_POLL_MS;
 }
 
-// Time remaining (g_led.lock held, after the LED decision of a fresh poll): starts over after a wake, a curve reload
-// and (inside BatteryEta_Update) on the charger, without a curve and after a gap between polls. Charging = the LED
-// logic's debounced state (new samples only after the debounced unplug) or the raw flags (the LED test screen
-// doesn't run the decision). Only computes: nothing is read or written here.
+// Time remaining (g_led.lock held, after the LED decision of a fresh poll): starts over after a curve reload (rate
+// discarded), a wake (rate kept as provisional, 17.7) and (inside BatteryEta_Update) on the charger, without a curve
+// (both discard it) and after a gap between polls (kept). Charging = the LED logic's debounced state (new samples only
+// after the debounced unplug) or the raw flags (the LED test screen doesn't run the decision). The wall clock
+// (osGetTime, shared page) only ages the kept rate. Only computes: nothing is read or written here.
 static void batteryLedEtaLocked(u64 nowMs, u8 flags)
 {
     u32 gen = BatteryCurve_Generation();
-    if (g_led.etaResetPending || gen != g_led.etaCurveGen)
+    if (gen != g_led.etaCurveGen)
+    {
+        g_led.etaResetPending = false; // a new curve wins over a wake: nothing is kept
+        g_led.etaCurveGen = gen;
+        BatteryEta_Restart(&g_led.eta, BATTERY_ETA_RESET_CURVE, (u32)nowMs);
+    }
+    else if (g_led.etaResetPending)
     {
         g_led.etaResetPending = false;
-        g_led.etaCurveGen = gen;
-        BatteryEta_Reset(&g_led.eta);
+        BatteryEta_Restart(&g_led.eta, BATTERY_ETA_RESET_WAKE, (u32)nowMs);
     }
     bool charging = g_led.logic.onCharger || (flags & (BATTERY_MCU_FLAG_ADAPTER | BATTERY_MCU_FLAG_CHARGING)) != 0;
-    BatteryEta_Update(&g_led.eta, (u32)nowMs, g_led.corrected >= 0.0f, charging, g_led.corrected);
+    BatteryEta_Update(&g_led.eta, (u32)nowMs, osGetTime(), g_led.corrected >= 0.0f, charging, g_led.corrected);
 }
 
 static void batteryLedApplyConfigLocked(const BatteryLedConfig *cfg);
@@ -666,6 +672,7 @@ void BatteryLed_GetStatus(BatteryLedStatus *out)
     out->barsReason = g_led.barsReason;
     out->etaState = g_led.eta.state;
     out->etaMinutes = g_led.eta.minutes;
+    BatteryEta_GetDiag(&g_led.eta, (u32)batteryLedNowMs(), &out->eta);
     LightLock_Unlock(&g_led.lock);
 }
 

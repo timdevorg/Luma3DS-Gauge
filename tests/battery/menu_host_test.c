@@ -185,7 +185,7 @@ static void testSummaryWidths(void)
         in.recElapsedMs = (rnd() & 1) ? rnd() : 0xFFFFFFFFu;
         in.recSleepGap = rnd() & 1;
         in.recErrors = rnd() & 1;
-        in.etaState = rnd() % (BATTERY_ETA_OK + 2);
+        in.etaState = rnd() % (BATTERY_ETA_PROVISIONAL + 2);
         in.etaMinutes = (rnd() & 1) ? BATTERY_ETA_MAX_MINUTES : rnd() % (BATTERY_ETA_MAX_MINUTES + 1);
         checkSummary(&in);
         n++;
@@ -286,6 +286,9 @@ static void testSummaryTexts(void)
         { BATTERY_ETA_OK,           45,   " Time left    ~45m         (at the current load)", BATTERY_TONE_NORMAL },
         { BATTERY_ETA_OK,           65,   " Time left    ~1h 05m      (at the current load)", BATTERY_TONE_NORMAL },
         { BATTERY_ETA_OK,           1440, " Time left    ~24h 00m     (at the current load)", BATTERY_TONE_NORMAL },
+        { BATTERY_ETA_PROVISIONAL,  190,  " Time left    ~3h 10m?     (provisional)",       BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_PROVISIONAL,  1440, " Time left    ~24h 00m?    (provisional)",       BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_PROVISIONAL,  0,    " Time left    <5m?         (provisional)",       BATTERY_TONE_INACTIVE },
     };
     for (u32 i = 0; i < sizeof(eta) / sizeof(eta[0]); i++)
     {
