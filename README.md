@@ -1,10 +1,83 @@
-# Luma3DS
+# Luma3DS-Gauge
 
 > [!IMPORTANT]
-> **This is Luma3DS-Gauge, an unofficial fork of [Luma3DS](https://github.com/LumaTeam/Luma3DS).** It is not affiliated with or supported by the Luma3DS team, so please don't report issues with this fork upstream.
-> It adds a **Battery Manager** to the Rosalina menu that learns the real discharge curve of aftermarket batteries and corrects the power LED. See [docs/battery-manager.md](docs/battery-manager.md).
+> **This is Luma3DS-Gauge, an unofficial fork of [Luma3DS](https://github.com/LumaTeam/Luma3DS) v13.5.** It is not affiliated with or supported by the Luma3DS team, so please don't report issues with this fork upstream.
 >
 > **AI disclosure:** the additions in this fork were made with the help of AI. See [AI disclosure](#ai-disclosure).
+
+Luma3DS-Gauge adds a **Battery Manager** to the Rosalina menu for 3DS consoles with an **aftermarket battery**.
+With such a cell the console's fuel gauge (run by the MCU, which applies the stock battery's discharge curve)
+is wrong. The power LED turns red and starts blinking hours before the battery is really empty. The Battery
+Manager learns the real discharge curve of your battery from recorded sessions and uses it to correct the LED
+and the HOME Menu battery icon. Everything else is plain Luma3DS v13.5.
+
+How it works in detail: [docs/battery-manager.md](docs/battery-manager.md).
+
+**Who it's for:** people with a replacement battery whose LED turns red far too early. It has been tested on
+**one New 3DS XL with an iFixit replacement cell**. The ptm patches (Sleep LED and HOME Menu bars) only match the
+New 3DS ptm system module they were written for. They check the code before every write and switch themselves
+off if it doesn't match. Old 3DS / 2DS models use a different ptm, so LED correction may work there, but the
+Sleep LED and HOME Menu bars will stay stock.
+
+### Features
+
+- **Power LED correction:** blue above 10 %, solid red at 10 % and below, blinking red at 3 % and below (both
+  thresholds adjustable), judged from the corrected battery level. Hysteresis keeps it from flickering, and it
+  is always blue while charging. Off by default, and you switch it on once a curve exists.
+- **Sleep LED:** dim blue (default), bright blue or stock while the lid is closed, set from the corrected level
+  at sleep entry. Solid red stays red, and the genuine low-battery blink stays stock.
+- **HOME Menu battery bars** follow the corrected level (4 bars / 3 bars thresholds adjustable). The level is
+  held while charging.
+- **Curve learning:** record full discharges on the console, then build a curve that maps the stock gauge % to the
+  real %. A graph compares it with the stock curve, and the previous curve is kept as a backup.
+- **Menus:** a home screen with a live summary and a "Next:" hint, one Settings screen, Learning (record,
+  sessions, build, graph), a Setup guide and Advanced (Diagnostics, LED test, restore previous curve, limits).
+  The Rosalina footer shows `stock%→corrected%`.
+- Estimated time remaining on the Battery Manager home screen.
+
+### Safety model
+
+- **No MCU firmware changes, no NAND writes.**
+- Everything lives in `boot.firm` plus files on the SD card under `/luma/battery/`.
+- There are only three kinds of hardware writes, each whitelisted and verified:
+  1. MCU register `0x29`, the power LED mode byte (nothing else on the MCU).
+  2. ptm's sleep / wake LED bytes, in the RAM of the running ptm process.
+  3. ptm's 4 battery-bar bytes, in the same process's RAM.
+
+  The ptm changes are in RAM only and are gone at the next boot.
+- To revert, restore your original `boot.firm`.
+
+### Install and revert
+
+1. Back up the current `/boot.firm` from the root of your SD card.
+2. Copy the `boot.firm` from the [latest release](https://github.com/timdevorg/Luma3DS-Gauge/releases/latest) to the SD root.
+3. Optional: keep your original Luma as `/luma/payloads/x_recovery.firm`. Hold <kbd>X</kbd> at boot to start it.
+
+To revert, put the old `boot.firm` back. Luma3DS itself (boot9strap) must already be installed.
+
+### Quick start
+
+1. Open Rosalina (<kbd>L+Down+Select</kbd>) → **Battery Manager...** → **Setup guide**.
+2. Charge to full, unplug, then **Learning → Start recording**.
+3. Play until the console switches itself off. Don't close the lid and don't plug in the charger.
+4. **Learning → Build curve**, then **Settings → Power LED: corrected**.
+
+More sessions give a better curve. Recording tips and every setting: [docs/battery-manager.md](docs/battery-manager.md).
+
+### Limits
+
+- The first ~5 s after power-on, the LED is the MCU's own (Rosalina isn't running yet).
+- No live LED update during sleep. A level that drops while asleep shows on wake.
+- A charger plugged in during sleep has no effect on the LED until the lid opens.
+- The Sleep LED and HOME Menu bars depend on the exact New 3DS ptm version. On any other version they stay stock (see Advanced → Diagnostics).
+- The HOME Menu bars refresh about every 8 s.
+- Learning currently needs complete discharges (from ≥ 95 % to automatic power-off, no sleep). Passive learning from partial sessions is planned.
+
+---
+
+## Upstream Luma3DS
+
+Everything below is the upstream Luma3DS README (v13.5), kept for reference.
 
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/LumaTeam/Luma3DS/total)
 ![License](https://img.shields.io/badge/License-GPLv3-blue.svg)
