@@ -81,6 +81,8 @@ static struct
     LightLock lock;
     bool configLoaded;
     BatteryLedConfig cfg;
+    bool cfgPending;        // settings saved during a sleep transition, applied by the thread once awake (F2)
+    BatteryLedConfig pendingCfg;
     BatteryLedLogic logic;
     BatteryLedWatch watch;
     BatteryLedSmoother volt;
@@ -428,6 +430,8 @@ static void batteryLedEtaLocked(u64 nowMs, u8 flags)
     BatteryEta_Update(&g_led.eta, (u32)nowMs, g_led.corrected >= 0.0f, charging, g_led.corrected);
 }
 
+static void batteryLedApplyConfigLocked(const BatteryLedConfig *cfg);
+
 static void batteryLedPoll(void)
 {
     BatteryMcuSample s;
@@ -435,6 +439,12 @@ static void batteryLedPoll(void)
     u64 nowMs = batteryLedNowMs();
 
     LightLock_Lock(&g_led.lock);
+    // Settings saved during a sleep transition (BatteryLed_SetConfig): active now that the console is awake
+    if (g_led.cfgPending && !g_led.shellClosed && !g_led.sleepPending)
+    {
+        g_led.cfgPending = false;
+        batteryLedApplyConfigLocked(&g_led.pendingCfg);
+    }
     bool fresh = R_SUCCEEDED(res);
     if (fresh)
     {
@@ -522,8 +532,27 @@ void BatteryLed_EnsureConfigLoaded(void)
 void BatteryLed_GetConfig(BatteryLedConfig *out)
 {
     LightLock_Lock(&g_led.lock);
-    *out = g_led.cfg;
+    *out = g_led.cfgPending ? g_led.pendingCfg : g_led.cfg; // the saved settings, also before they are active
     LightLock_Unlock(&g_led.lock);
+}
+
+// Makes cfg the active config (g_led.lock held). Only while awake (lid open, no sleep pending): it re-patches ptm's
+// sleep / wake bytes and changes the LED decision, which must not happen between the sleep hook and wake (14.6).
+static void batteryLedApplyConfigLocked(const BatteryLedConfig *cfg)
+{
+    BatteryLedConfig old = g_led.cfg;
+    g_led.cfg = *cfg;
+    if (cfg->redPct != old.redPct || cfg->blinkPct != old.blinkPct || cfg->blueMode != old.blueMode || (cfg->override && !old.override))
+        BatteryLedLogic_Reevaluate(&g_led.logic);
+    if (cfg->override != old.override)
+    {
+        // A fresh start: clear a previous error and the counters that lead to it
+        g_led.error = BATTERY_LED_ERR_NONE;
+        g_led.writeFailStreak = 0;
+        g_led.stormCount = 0;
+    }
+    batteryLedPtmPatchLocked(); // awake: ptm isn't in its sleep routine
+    g_led.barsForce = true;     // bars: decided and applied by the thread's next poll
 }
 
 Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
@@ -533,22 +562,27 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
 
     BatteryLed_EnsureConfigLoaded(); // so a late boot load can't overwrite this
 
+    // F2: the Settings editor also saves when the menu is closed by the lid / a sleep request (menuShouldExit), i.e.
+    // right after the sleep hook ran (main.c sets shellClosed / sleepPending in BatteryLed_HandleNotification before
+    // menuShouldExit). Applying then would re-patch ptm and re-decide the LED in the middle of the sleep transition.
+    // So the change is saved to SD now but only becomes active when the thread sees the console awake again (it is
+    // kicked on 0x213 / fully awake and applies it at that poll). Chosen over keeping the edits unsaved: nothing the
+    // user changed is lost, and there is a single place where settings become active while awake.
     LightLock_Lock(&g_led.lock);
-    BatteryLedConfig old = g_led.cfg;
-    g_led.cfg = cfg;
-    if (cfg.redPct != old.redPct || cfg.blinkPct != old.blinkPct || cfg.blueMode != old.blueMode || (cfg.override && !old.override))
-        BatteryLedLogic_Reevaluate(&g_led.logic);
-    if (cfg.override != old.override)
+    bool defer = g_led.shellClosed || g_led.sleepPending;
+    if (defer)
     {
-        // A fresh start: clear a previous error and the counters that lead to it
-        g_led.error = BATTERY_LED_ERR_NONE;
-        g_led.writeFailStreak = 0;
-        g_led.stormCount = 0;
+        g_led.pendingCfg = cfg;
+        g_led.cfgPending = true;
     }
-    batteryLedPtmPatchLocked(); // awake (the menu is closed during sleep): ptm isn't in its sleep routine
-    g_led.barsForce = true;     // bars: decided and applied by the thread's next poll (kicked right now)
+    else
+    {
+        g_led.cfgPending = false;
+        batteryLedApplyConfigLocked(&cfg);
+    }
     LightLock_Unlock(&g_led.lock);
-    svcSignalEvent(g_ledKick);
+    if (!defer)
+        svcSignalEvent(g_ledKick);
 
     LightLock_Lock(&g_cfgFileLock);
     int n = sprintf(g_cfgBuf,

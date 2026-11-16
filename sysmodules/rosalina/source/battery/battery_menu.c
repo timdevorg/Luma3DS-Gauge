@@ -1033,8 +1033,8 @@ static void batteryOfferPowerLed(void)
     if (R_FAILED(res))
     {
         char line[48];
-        sprintf(line, "Error 0x%08lx.", (u32)res);
-        batteryMenuMessage(title, "Could not save config.ini.", line);
+        sprintf(line, "Could not save config.ini (0x%08lx).", (u32)res);
+        batteryMenuMessage(title, line, "Power LED: corrected until reboot.");
         return;
     }
     batteryTextBegin();
@@ -1412,12 +1412,14 @@ static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows
 
     if (!batteryConfigEqual(&cfg, &orig))
     {
+        // On a forced close (lid / sleep: menuShouldExit) BatteryLed_SetConfig saves now and applies after wake
         Result res = BatteryLed_SetConfig(&cfg);
         if (R_FAILED(res))
         {
+            // F9: the settings are already active, only the file failed
             char line[48];
-            sprintf(line, "Error 0x%08lx.", (u32)res);
-            batteryMenuMessage(title, "Could not save config.ini.", line);
+            sprintf(line, "Could not save config.ini (0x%08lx).", (u32)res);
+            batteryMenuMessage(title, line, "The new settings are active until reboot.");
         }
         else
             batteryFlashHint(COLOR_GREEN, "Saved.");

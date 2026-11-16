@@ -74,8 +74,11 @@ void BatteryLed_HandleNotification(u32 notificationId);
 void BatteryLed_GetStatus(BatteryLedStatus *out);
 /// Loads config.ini if that hasn't happened yet (menu thread).
 void BatteryLed_EnsureConfigLoaded(void);
+/// The saved settings (also ones saved during a sleep transition that aren't active yet).
 void BatteryLed_GetConfig(BatteryLedConfig *out);
 /// Applies (sanitized) settings, saves config.ini and wakes the thread. Clears a control error. Menu thread.
+/// With the lid closed or sleep pending (the menu was closed by it) the settings are saved now but applied by the
+/// thread only once the console is awake again. On a save error the settings are active anyway (until reboot).
 Result BatteryLed_SetConfig(const BatteryLedConfig *cfg);
 
 /// LED test screen: the thread stops controlling the LED until BatteryLed_TestEnd().
