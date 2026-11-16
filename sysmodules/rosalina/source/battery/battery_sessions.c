@@ -98,7 +98,7 @@ Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len)
     return R_FAILED(res) ? res : res2;
 }
 
-Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len)
+Result BatteryFs_WriteSafelyKeepOld(const char *path, const char *tmpPath, const char *bakPath, const void *data, u32 len)
 {
     Result res = BatteryFs_EnsureDirs();
     if (R_SUCCEEDED(res))
@@ -111,10 +111,22 @@ Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *
     if (R_FAILED(res))
         return res;
 
-    FSUSER_DeleteFile(archive, batteryPath(path)); // may not exist
+    if (bakPath != NULL)
+    {
+        FSUSER_DeleteFile(archive, batteryPath(bakPath)); // may not exist
+        if (R_FAILED(FSUSER_RenameFile(archive, batteryPath(path), archive, batteryPath(bakPath))))
+            FSUSER_DeleteFile(archive, batteryPath(path)); // no old file (or it can't be kept): replace as without a backup
+    }
+    else
+        FSUSER_DeleteFile(archive, batteryPath(path)); // may not exist
     res = FSUSER_RenameFile(archive, batteryPath(tmpPath), archive, batteryPath(path));
     FSUSER_CloseArchive(archive);
     return res;
+}
+
+Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len)
+{
+    return BatteryFs_WriteSafelyKeepOld(path, tmpPath, NULL, data, len);
 }
 
 static Result batteryFsReadAt(const char *path, bool tail, void *data, u32 len, u32 *outLen)
@@ -334,7 +346,7 @@ static void batteryClassify(BatterySessionInfo *info)
                            info->endReason == BATTERY_END_NONE; // no end line: cut off (unless it's the active session)
     if (info->hasSleepGap)
         info->cls = BATTERY_SESSION_INVALID;
-    else if (info->hasData && info->startPctX10 >= 950 && endedByShutdown)
+    else if (info->hasData && info->startPctX10 >= BATTERY_SESSION_COMPLETE_START_X10 && endedByShutdown)
         info->cls = BATTERY_SESSION_COMPLETE;
     else
         info->cls = BATTERY_SESSION_INCOMPLETE;
@@ -420,6 +432,13 @@ const char *BatterySessions_ClassName(u8 cls)
         case BATTERY_SESSION_INVALID:   return "invalid";
         default:                        return "incomplete";
     }
+}
+
+u8 BatterySessions_StartCheck(u32 pctX10, bool adapter)
+{
+    if (adapter)
+        return BATTERY_START_CHARGER;
+    return pctX10 < BATTERY_SESSION_COMPLETE_START_X10 ? BATTERY_START_LOW : BATTERY_START_OK;
 }
 
 const char *BatterySessions_EndReasonName(u8 reason)

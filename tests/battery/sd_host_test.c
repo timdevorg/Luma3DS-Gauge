@@ -12,10 +12,14 @@
 *     curve.bin byte-identical to `build_curve.py --bin` (sessions sorted ascending)
 *   - the v2 copies build the same curve.bin
 *   - BatteryFs_WriteSafely leaves only the target file, BatteryFs_SdReady
+*   - BatteryFs_WriteSafelyKeepOld keeps the old file as .bak; a second build keeps the first curve as curve.bak,
+*     BatteryCurve_RestoreBackup swaps curve.bak and curve.bin (via curve.tmp) and reloads, an invalid / missing
+*     curve.bak changes nothing
+*   - BatterySessions_StartCheck (Start recording warning: below 95 %, charger)
 *
 *   Usage: sd_host_test sd_root_v1 sd_root_v2 expected_curve.bin number [...]
 *   (each root holds luma/battery/sessions/NNNN.csv), or
-*          sd_host_test sd_root    (no session CSVs: only the safe-write / SD-ready checks)
+*          sd_host_test sd_root    (no session CSVs: only the safe-write / keep-old / start check / SD-ready checks)
 *   Run it through tests/battery/run_host_test.sh.
 */
 
@@ -261,6 +265,86 @@ static void safeWriteTest(void)
     CHECK(access(cfgTmp, F_OK) != 0);
 }
 
+static bool fileIs(const char *sdPath, const void *data, size_t len)
+{
+    char p[1024];
+    static u8 got[4096];
+    size_t gotLen = 0;
+    snprintf(p, sizeof(p), "%s%s", g_root, sdPath);
+    return readFile(p, got, sizeof(got), &gotLen) && gotLen == len && memcmp(got, data, len) == 0;
+}
+
+static bool fileExists(const char *sdPath)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s%s", g_root, sdPath);
+    return access(p, F_OK) == 0;
+}
+
+// Keep-old safe write (curve.bak mechanism) and the start check, no session CSVs needed
+static void keepOldAndStartCheckTest(void)
+{
+    const char *bin = "/luma/battery/k.bin", *tmp = "/luma/battery/k.tmp", *bak = "/luma/battery/k.bak";
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafelyKeepOld(bin, tmp, bak, "A1", 2)));  // no old file: nothing to keep
+    CHECK(fileIs(bin, "A1", 2) && !fileExists(bak) && !fileExists(tmp));
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafelyKeepOld(bin, tmp, bak, "B22", 3)));
+    CHECK(fileIs(bin, "B22", 3) && fileIs(bak, "A1", 2) && !fileExists(tmp));
+    CHECK(R_SUCCEEDED(BatteryFs_WriteSafelyKeepOld(bin, tmp, bak, "C333", 4))); // the older backup is replaced
+    CHECK(fileIs(bin, "C333", 4) && fileIs(bak, "B22", 3) && !fileExists(tmp));
+
+    CHECK(BatterySessions_StartCheck(950, false) == BATTERY_START_OK);
+    CHECK(BatterySessions_StartCheck(1000, false) == BATTERY_START_OK);
+    CHECK(BatterySessions_StartCheck(949, false) == BATTERY_START_LOW);
+    CHECK(BatterySessions_StartCheck(0, false) == BATTERY_START_LOW);
+    CHECK(BatterySessions_StartCheck(1000, true) == BATTERY_START_CHARGER);
+    CHECK(BatterySessions_StartCheck(100, true) == BATTERY_START_CHARGER);
+    printf("keep-old safe write and start check: %s\n", g_failures == 0 ? "OK" : "FAILED");
+}
+
+// curve.bak: built after the first build, restore swaps (needs the full curve in expected / count sessions)
+static void curveBackupTest(const u16 *newestFirst, u32 count, const u8 *expected, size_t expectedLen)
+{
+    static u8 single[4096];
+    size_t singleLen = 0;
+    char p[1024];
+    BatteryCurveBuildResult res;
+    Result r = 0;
+    u16 n = 0, sessions[BATTERY_CURVE_MAX_SESSIONS];
+
+    // First build of this SD (done by the caller): no previous curve, nothing to restore, curve.bin untouched
+    CHECK(!fileExists(BATTERY_CURVE_BAK_PATH));
+    CHECK(!BatteryCurve_BackupInfo(&n, NULL));
+    CHECK(BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_NO_BACKUP && fileIs(BATTERY_CURVE_PATH, expected, expectedLen));
+
+    // Second build from the newest session only: the full curve is kept as curve.bak
+    CHECK(BatteryCurve_Build(newestFirst, 1, NULL, &res));
+    snprintf(p, sizeof(p), "%s%s", g_root, BATTERY_CURVE_PATH);
+    CHECK(readFile(p, single, sizeof(single), &singleLen) && singleLen == expectedLen);
+    CHECK(fileIs(BATTERY_CURVE_BAK_PATH, expected, expectedLen) && !fileExists(BATTERY_CURVE_TMP_PATH));
+    CHECK(BatteryCurve_BackupInfo(&n, sessions) && n == count && sessions[0] == newestFirst[count - 1]);
+    CHECK(BatteryCurve_Snapshot() != NULL && BatteryCurve_Snapshot()->numSessions == 1);
+
+    // Restore: curve.bak becomes the curve, the single-session curve becomes curve.bak, the loaded curve follows
+    CHECK(BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_OK && R_SUCCEEDED(r));
+    CHECK(fileIs(BATTERY_CURVE_PATH, expected, expectedLen) && fileIs(BATTERY_CURVE_BAK_PATH, single, singleLen));
+    CHECK(!fileExists(BATTERY_CURVE_TMP_PATH));
+    CHECK(BatteryCurve_IsLoaded() && BatteryCurve_Snapshot() != NULL && BatteryCurve_Snapshot()->numSessions == count);
+    // Twice: swaps back
+    CHECK(BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_OK);
+    CHECK(fileIs(BATTERY_CURVE_PATH, single, singleLen) && fileIs(BATTERY_CURVE_BAK_PATH, expected, expectedLen));
+    CHECK(BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_OK && fileIs(BATTERY_CURVE_PATH, expected, expectedLen));
+
+    // An invalid curve.bak (truncated / bad checksum) is never restored
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_BAK_PATH, single, 100)));
+    CHECK(!BatteryCurve_BackupInfo(NULL, NULL) && BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_NO_BACKUP);
+    single[10] ^= 0xFF;
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_BAK_PATH, single, singleLen)));
+    CHECK(!BatteryCurve_BackupInfo(NULL, NULL) && BatteryCurve_RestoreBackup(&r) == BATTERY_CURVE_RESTORE_NO_BACKUP);
+    CHECK(fileIs(BATTERY_CURVE_PATH, expected, expectedLen) && BatteryCurve_Snapshot()->numSessions == count);
+    printf("  curve.bak: kept by the second build, restore swaps twice, invalid backup refused: %s\n",
+           g_failures == 0 ? "OK" : "FAILED");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2)
@@ -273,8 +357,9 @@ int main(int argc, char **argv)
         mkdir(luma, 0755); // like a real SD card; EnsureDirs creates luma/battery[/sessions]
         CHECK(R_SUCCEEDED(BatteryFs_EnsureDirs()));
         safeWriteTest();
+        keepOldAndStartCheckTest();
         printf("sessions / curve build: SKIPPED (no session CSVs)\n");
-        printf("%s\n", g_failures == 0 ? "sd host test: OK (safe write only)" : "sd host test: FAILED");
+        printf("%s\n", g_failures == 0 ? "sd host test: OK (safe write, keep-old and start check only)" : "sd host test: FAILED");
         return g_failures == 0 ? 0 : 1;
     }
     if (argc < 5)
@@ -334,7 +419,10 @@ int main(int argc, char **argv)
         CHECK(same);
         CHECK(access(tmp, F_OK) != 0);
 
+        curveBackupTest(newestFirst, count, expected, expectedLen);
         safeWriteTest();
+        if (r == 0)
+            keepOldAndStartCheckTest();
     }
 
     bool sameInfo = true;

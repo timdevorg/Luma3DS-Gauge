@@ -5,9 +5,10 @@
 *   Battery Manager: curve files on SD (build from session CSVs, safe write, load) and
 *   the loaded curve used for lookups. The math is in battery_curve.c.
 *
-*   curve.bin is written as curve.tmp first, then curve.bin is deleted and curve.tmp renamed.
-*   A power cut can at worst leave curve.tmp next to (or instead of) curve.bin; the loader
-*   validates the checksum and falls back to curve.tmp.
+*   curve.bin is written as curve.tmp first, then the old curve.bin is renamed to curve.bak (the previous
+*   curve, for Advanced > Restore previous curve) and curve.tmp to curve.bin. A power cut can at worst
+*   leave curve.tmp next to (or instead of) curve.bin; the loader validates the checksum and falls back
+*   to curve.tmp.
 */
 
 #include <3ds.h>
@@ -207,11 +208,48 @@ bool BatteryCurve_Build(const u16 *unsortedNumbers, u32 count, BatteryCurveProgr
 
     BatteryCurve_FileFinalize(&g_buildFile);
 
-    // curve.tmp -> delete curve.bin -> rename curve.tmp to curve.bin
-    out->res = BatteryFs_WriteSafely(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, &g_buildFile, sizeof(g_buildFile));
+    // curve.tmp -> curve.bin renamed to curve.bak -> curve.tmp renamed to curve.bin
+    out->res = BatteryFs_WriteSafelyKeepOld(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, BATTERY_CURVE_BAK_PATH,
+                                            &g_buildFile, sizeof(g_buildFile));
     if (R_FAILED(out->res))
         return false;
     return BatteryCurve_Load();
+}
+
+// ---- Previous curve (curve.bak) ----
+
+// Reads curve.bak into g_buildFile and validates it
+static bool batteryCurveReadBackup(void)
+{
+    u32 len = 0;
+    if (R_FAILED(BatteryFs_ReadHead(BATTERY_CURVE_BAK_PATH, &g_buildFile, sizeof(g_buildFile), &len)) || len != sizeof(g_buildFile))
+        return false;
+    return BatteryCurve_FileIsValid(&g_buildFile);
+}
+
+bool BatteryCurve_BackupInfo(u16 *outNumSessions, u16 *outSessions)
+{
+    if (!batteryCurveReadBackup())
+        return false;
+    if (outNumSessions != NULL)
+        *outNumSessions = g_buildFile.numSessions;
+    if (outSessions != NULL)
+        memcpy(outSessions, g_buildFile.sessions, sizeof(g_buildFile.sessions));
+    return true;
+}
+
+u8 BatteryCurve_RestoreBackup(Result *outRes)
+{
+    *outRes = 0;
+    if (!batteryCurveReadBackup())
+        return BATTERY_CURVE_RESTORE_NO_BACKUP;
+
+    // Same sequence as a build: curve.tmp, current curve.bin -> curve.bak, curve.tmp -> curve.bin
+    *outRes = BatteryFs_WriteSafelyKeepOld(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, BATTERY_CURVE_BAK_PATH,
+                                           &g_buildFile, sizeof(g_buildFile));
+    if (R_FAILED(*outRes))
+        return BATTERY_CURVE_RESTORE_SD_ERROR;
+    return BatteryCurve_Load() ? BATTERY_CURVE_RESTORE_OK : BATTERY_CURVE_RESTORE_LOAD_FAILED;
 }
 
 // ---- Session selection (curve_select.ini) ----

@@ -23,6 +23,7 @@
 
 #define BATTERY_CURVE_PATH          "/luma/battery/curve.bin"
 #define BATTERY_CURVE_TMP_PATH      "/luma/battery/curve.tmp"
+#define BATTERY_CURVE_BAK_PATH      "/luma/battery/curve.bak"   // the previous curve.bin (same format), kept by Build / Restore
 #define BATTERY_CURVE_SELECT_PATH   "/luma/battery/curve_select.ini"
 
 #define BATTERY_CURVE_MAGIC         0x56524342u // "BCRV"
@@ -167,8 +168,26 @@ typedef struct BatteryCurveBuildResult
 
 /// Builds the curve from the given sessions (any order; used in ascending session-number order, like
 /// scripts/build_curve.py, so curve.bin is byte-identical to the host's), writes it safely
-/// (curve.tmp, then rename to curve.bin) and loads it. Menu thread only (static buffers).
+/// (curve.tmp, old curve.bin renamed to curve.bak, curve.tmp renamed to curve.bin) and loads it.
+/// Menu thread only (static buffers).
 bool BatteryCurve_Build(const u16 *numbers, u32 count, BatteryCurveProgressCb cb, BatteryCurveBuildResult *out);
+
+/// Reads curve.bak and checks it (like the loader). Returns false if it is missing or invalid. *outNumSessions and
+/// outSessions (BATTERY_CURVE_MAX_SESSIONS entries) may be NULL. Menu thread only (uses the Snapshot buffer: a pointer
+/// returned by BatteryCurve_Snapshot before this call is overwritten).
+bool BatteryCurve_BackupInfo(u16 *outNumSessions, u16 *outSessions);
+
+typedef enum BatteryCurveRestore
+{
+    BATTERY_CURVE_RESTORE_OK = 0,
+    BATTERY_CURVE_RESTORE_NO_BACKUP,    // curve.bak missing or invalid: nothing changed
+    BATTERY_CURVE_RESTORE_SD_ERROR,     // *outRes
+    BATTERY_CURVE_RESTORE_LOAD_FAILED,  // written, but curve.bin doesn't load back
+} BatteryCurveRestore;
+
+/// Makes curve.bak the curve again: its content goes through curve.tmp like a build, the current curve.bin becomes
+/// curve.bak (so restoring twice swaps back), then the curve is reloaded. Menu thread only (static buffers).
+u8 BatteryCurve_RestoreBackup(Result *outRes);
 
 /// Selection file: "NNNN=1" / "NNNN=0" lines. Returns -1 if the session isn't listed.
 void BatteryCurve_SelectionLoad(void);

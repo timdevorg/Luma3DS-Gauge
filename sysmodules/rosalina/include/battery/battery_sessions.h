@@ -15,6 +15,7 @@
 #define BATTERY_STATE_PATH      "/luma/battery/state"
 
 #define BATTERY_MAX_SESSION_NUMBER  9999
+#define BATTERY_SESSION_COMPLETE_START_X10  950 // "complete" needs a first sample at 95.0 % or more
 #define BATTERY_MAX_LISTED_SESSIONS 64
 
 typedef enum BatterySessionClass
@@ -62,6 +63,10 @@ Result BatteryFs_WriteWhole(const char *path, const void *data, u32 len);
 /// Power-cut safe replace: writes tmpPath (flushed), deletes path, renames tmpPath to path.
 /// Readers should fall back to tmpPath if path is missing or invalid.
 Result BatteryFs_WriteSafely(const char *path, const char *tmpPath, const void *data, u32 len);
+/// Same, but keeps the old file: writes tmpPath (flushed), deletes bakPath, renames path to bakPath (if path can't be
+/// renamed, e.g. it doesn't exist, it is deleted as in WriteSafely), renames tmpPath to path. Nothing is touched if
+/// writing tmpPath fails. At any power cut there is a valid path or a valid tmpPath (like WriteSafely).
+Result BatteryFs_WriteSafelyKeepOld(const char *path, const char *tmpPath, const char *bakPath, const void *data, u32 len);
 /// Reads up to len bytes ending at the end of the file (len bytes from offset size-len). Returns bytes read in *outLen.
 Result BatteryFs_ReadTail(const char *path, void *data, u32 len, u32 *outLen);
 /// Reads up to len bytes from the start of the file.
@@ -80,4 +85,14 @@ Result BatterySessions_Parse(u32 number, BatterySessionInfo *out);
 Result BatterySessions_Delete(u32 number);
 
 const char *BatterySessions_ClassName(u8 cls);
+
+typedef enum BatteryStartCheck
+{
+    BATTERY_START_OK = 0,       // can become a complete session
+    BATTERY_START_LOW,          // below BATTERY_SESSION_COMPLETE_START_X10: can only become incomplete (menu asks first)
+    BATTERY_START_CHARGER,      // adapter plugged in: the recorder refuses to start (BATTERY_REC_CHARGER_PLUGGED)
+} BatteryStartCheck;
+
+/// Start recording check (menu), from the MCU % (tenths) and the adapter flag. Pure.
+u8 BatterySessions_StartCheck(u32 pctX10, bool adapter);
 const char *BatterySessions_EndReasonName(u8 reason);

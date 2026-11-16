@@ -4,7 +4,7 @@
 # Usage: tests/battery/run_host_test.sh [session.csv ...]
 #
 # Without arguments it uses sessions/0001.csv and sessions/0002.csv (repo root, gitignored) if both
-# exist. Otherwise only the unit tests run (LED logic, safe write) and the parts that need
+# exist. Otherwise only the unit tests run (LED logic, safe write, start check) and the parts that need
 # recorded sessions (curve comparison, session parsing, LED replay) are SKIPPED, with a message.
 # Get the CSVs from the console's /luma/battery/sessions/ into sessions/ first for the full run.
 #
@@ -17,8 +17,8 @@
 #   - converts the CSVs to recorder v2 (extra LED columns) and checks that build_curve.py and
 #     the console's session parser / curve builder (battery_sessions.c, battery_curve_sd.c on
 #     host stubs, sd_host_test.c) treat v1 and v2 the same, and that BatteryCurve_Build with
-#     the sessions newest first gives the same curve.bin as build_curve.py
-#   - LED logic unit tests + replay of the sessions with that curve (led_host_test.c)
+#     the sessions newest first gives the same curve.bin as build_curve.py; a rebuild keeps curve.bak, restore swaps
+#   - LED logic + settings editor unit tests, replay of the sessions with that curve (led_host_test.c)
 # Always (with or without sessions):
 #   - ptm sleep / wake LED patch: decision matrix + verification unit tests (ptm_host_test.c). With the
 #     New 3DS ptm dump (GodMode9 "Extract .code" of 0004013020002202) also checks both patterns in the

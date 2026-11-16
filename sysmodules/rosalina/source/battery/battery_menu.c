@@ -3,7 +3,7 @@
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
 *   Battery Manager: Rosalina submenu (settings, learning: recording / sessions / curve / graph, advanced: diagnostics,
-*   LED test, blue LED type, limits). Settings only go through BatteryLed_SetConfig; nothing here writes to the MCU or ptm.
+*   LED test, blue LED type, restore previous curve, limits; setup guide). Settings only go through BatteryLed_SetConfig; nothing here writes to the MCU or ptm.
 */
 
 #include <3ds.h>
@@ -25,6 +25,8 @@
 
 #define BATTERY_MENU_LINE_CHARS     49 // (320 - 2 * 10) / 6 - 1
 #define BATTERY_MENU_LIST_ROWS      15
+#define BATTERY_MENU_BODY_LINES     17 // y = 30 .. 206; the hint row is at SCREEN_BOT_HEIGHT - 20
+#define BATTERY_SESSION_ROWS        13 // Sessions list: header, 13 rows, blank, legend / feedback
 
 // Menu tree (docs/battery-manager.md, section 4.2). Settings are edited on one screen and saved when it is left, so no
 // item title depends on config.ini. The only dynamic title is Start / Stop recording, refreshed by its visibility callback
@@ -39,7 +41,9 @@ static void batteryMenuGraph(void);
 static void batteryMenuDiagnostics(void);
 static void batteryMenuLedTest(void);
 static void batteryMenuBlueLedType(void);
+static void batteryMenuRestoreCurve(void);
 static void batteryMenuAbout(void);
+static void batteryMenuSetupGuide(void);
 static bool batteryRecordingTitleRefresh(void);
 
 #define BATTERY_RECORDING_TITLE_CHARS   34 // "Stop recording  #9999  1193:02:47" (u32 ms) fits
@@ -63,6 +67,7 @@ static Menu batteryAdvancedMenu = {
         { "Diagnostics", METHOD, .method = &batteryMenuDiagnostics },
         { "LED test", METHOD, .method = &batteryMenuLedTest },
         { "Blue LED type", METHOD, .method = &batteryMenuBlueLedType },
+        { "Restore previous curve", METHOD, .method = &batteryMenuRestoreCurve },
         { "Limits and about", METHOD, .method = &batteryMenuAbout },
         {},
     }
@@ -73,6 +78,7 @@ Menu batteryMenu = {
     {
         { "Settings", METHOD, .method = &batteryMenuSettings },
         { "Learning...", MENU, .menu = &batteryLearningMenu },
+        { "Setup guide", METHOD, .method = &batteryMenuSetupGuide },
         { "Advanced...", MENU, .menu = &batteryAdvancedMenu },
         {},
     }
@@ -117,24 +123,88 @@ static void batteryFormatDuration(char *out, u32 ms)
     sprintf(out, "%lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
 }
 
-// Simple message screen, B to go back
-static void batteryMenuMessage(const char *title, const char *line1, const char *line2)
+// ---- Text screens (messages, confirmations, setup guide) ----
+
+typedef struct BatteryText
 {
+    u32 count;
+    u32 color[BATTERY_MENU_BODY_LINES];
+    char line[BATTERY_MENU_BODY_LINES][BATTERY_MENU_LINE_CHARS + 1];
+} BatteryText;
+
+static BatteryText g_text; // menu thread only
+
+static void batteryTextBegin(void)
+{
+    g_text.count = 0;
+}
+
+// Adds one body line, cut at 49 chars like batteryMenuLine; lines beyond 17 are dropped (every screen is sized to fit)
+static void batteryTextAdd(u32 color, const char *fmt, ...)
+{
+    char buf[96];
+    va_list args;
+    va_start(args, fmt);
+    vsprintf(buf, fmt, args);
+    va_end(args);
+    buf[BATTERY_MENU_LINE_CHARS] = 0;
+
+    if (g_text.count < BATTERY_MENU_BODY_LINES)
+    {
+        memcpy(g_text.line[g_text.count], buf, sizeof(g_text.line[0]));
+        g_text.color[g_text.count++] = color;
+    }
+}
+
+// Shows the collected lines under title with hint until one of keys is pressed. Returns that key, 0 if the menu closes.
+static u32 batteryTextShow(const char *title, const char *hint, u32 keys)
+{
+    u32 pressed = 0;
     batteryMenuClear();
     do
     {
         Draw_Lock();
         Draw_DrawString(10, 10, COLOR_TITLE, title);
         u32 y = 30;
-        if (line1 != NULL)
-            y = batteryMenuLine(y, COLOR_WHITE, "%s", line1);
-        if (line2 != NULL)
-            batteryMenuLine(y, COLOR_WHITE, "%s", line2);
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
+        for (u32 i = 0; i < g_text.count; i++)
+            y = batteryMenuLine(y, g_text.color[i], "%s", g_text.line[i]);
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, hint);
         Draw_FlushFramebuffer();
         Draw_Unlock();
+        pressed = waitInput();
     }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
+    while (!(pressed & keys) && !menuShouldExit);
+    batteryMenuClear();
+    return menuShouldExit ? 0 : (pressed & keys);
+}
+
+// A / B question; true if A was pressed
+static bool batteryTextConfirm(const char *title, const char *hint)
+{
+    return batteryTextShow(title, hint, KEY_A | KEY_B) == KEY_A;
+}
+
+// Simple message screen, B to go back
+static void batteryMenuMessage(const char *title, const char *line1, const char *line2)
+{
+    batteryTextBegin();
+    if (line1 != NULL)
+        batteryTextAdd(COLOR_WHITE, "%s", line1);
+    if (line2 != NULL)
+        batteryTextAdd(COLOR_WHITE, "%s", line2);
+    batteryTextShow(title, "Press B to go back.", KEY_B);
+}
+
+// One line of feedback in the hint row for 0.7 s (e.g. "Saved."), before the screen is left. Not while the menu closes.
+static void batteryFlashHint(u32 color, const char *text)
+{
+    if (menuShouldExit)
+        return;
+    Draw_Lock();
+    Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, color, "%-*s", BATTERY_MENU_LINE_CHARS, text);
+    Draw_FlushFramebuffer();
+    Draw_Unlock();
+    svcSleepThread(700 * 1000 * 1000LL);
 }
 
 static void batteryFormatX10(char *out, float v)
@@ -361,16 +431,57 @@ static bool batteryRecordingTitleRefresh(void)
 
 static void batteryStartRecording(void)
 {
+    static const char *const title = "Battery Manager - Start recording";
     char line[64];
     u16 number = 0;
     Result res = 0;
+    BatteryMcuSample s;
+
+    // Check first (a failed MCU read is reported by BatteryRecorder_Start below)
+    if (R_SUCCEEDED(BatteryMcu_ReadSample(&s)))
+    {
+        u32 p = BatteryMcu_PercentX10(s.pctInt, s.pctFrac);
+        u8 check = BatterySessions_StartCheck(p, (s.flags & BATTERY_MCU_FLAG_ADAPTER) != 0);
+        if (check == BATTERY_START_CHARGER)
+        {
+            // The recorder refuses to start on the charger (a session ends as soon as the charger is plugged in)
+            batteryTextBegin();
+            batteryTextAdd(COLOR_WHITE, "The charger is plugged in.");
+            batteryTextAdd(COLOR_WHITE, "");
+            batteryTextAdd(COLOR_WHITE, "A recording has to run on the battery until");
+            batteryTextAdd(COLOR_WHITE, "the console switches itself off.");
+            batteryTextAdd(COLOR_WHITE, "Best: charge to 100 %%, unplug, then start.");
+            batteryTextShow(title, "Press B to go back.", KEY_B);
+            return;
+        }
+        if (check == BATTERY_START_LOW)
+        {
+            batteryTextBegin();
+            batteryTextAdd(COLOR_RED, "The battery is at %lu.%lu %% (stock gauge).", p / 10, p % 10);
+            batteryTextAdd(COLOR_WHITE, "");
+            batteryTextAdd(COLOR_WHITE, "Only a session that starts at 95 %% or more");
+            batteryTextAdd(COLOR_WHITE, "and runs until the console switches itself");
+            batteryTextAdd(COLOR_WHITE, "off can be used for the curve. This one will");
+            batteryTextAdd(COLOR_WHITE, "be partial (still useful as a record).");
+            batteryTextAdd(COLOR_WHITE, "");
+            batteryTextAdd(COLOR_WHITE, "Best: charge to 100 %%, unplug, then start.");
+            if (!batteryTextConfirm(title, "A: start anyway  B: cancel"))
+                return;
+        }
+    }
 
     BatteryRecorderError err = BatteryRecorder_Start(&number, &res);
     if (err == BATTERY_REC_OK)
     {
-        sprintf(line, "Recording session #%04lu.", (u32)number);
-        batteryMenuMessage("Battery Manager - Start recording", line,
-                           "Don't sleep or charge until it powers off.");
+        batteryTextBegin();
+        batteryTextAdd(COLOR_GREEN, "Recording session #%04lu.", (u32)number);
+        batteryTextAdd(COLOR_WHITE, "");
+        batteryTextAdd(COLOR_WHITE, "Use the console normally until it switches");
+        batteryTextAdd(COLOR_WHITE, "itself off. Closing the lid (sleep) or");
+        batteryTextAdd(COLOR_WHITE, "plugging in the charger makes the session");
+        batteryTextAdd(COLOR_WHITE, "unusable for the curve.");
+        batteryTextAdd(COLOR_WHITE, "To end early: Learning > Stop recording.");
+        batteryTextShow(title, "Press B to go back.", KEY_B);
     }
     else
     {
@@ -380,23 +491,34 @@ static void batteryStartRecording(void)
             sprintf(line, "Error 0x%08lx.", (u32)res);
         else
             line[0] = 0;
-        batteryMenuMessage("Battery Manager - Start recording", BatteryRecorder_ErrorString(err), line);
+        batteryMenuMessage(title, BatteryRecorder_ErrorString(err), line);
     }
 }
 
-static void batteryStopRecording(void)
+static void batteryStopRecording(const BatteryRecorderStatus *st)
 {
-    char line[64];
+    static const char *const title = "Battery Manager - Stop recording";
+    char line[64], dur[16];
     u16 number = 0;
+
+    batteryFormatDuration(dur, st->elapsedMs);
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Stop recording session #%04lu (%s)?", (u32)st->number, dur);
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "A stopped session can't be used for the curve:");
+    batteryTextAdd(COLOR_WHITE, "only one that runs until the console switches");
+    batteryTextAdd(COLOR_WHITE, "itself off can. The data stays on the SD card.");
+    if (!batteryTextConfirm(title, "A: stop  B: cancel"))
+        return;
 
     BatteryRecorderError err = BatteryRecorder_Stop(&number);
     if (err == BATTERY_REC_OK)
     {
         sprintf(line, "Session #%04lu stopped.", (u32)number);
-        batteryMenuMessage("Battery Manager - Stop recording", line, NULL);
+        batteryMenuMessage(title, line, NULL);
     }
     else
-        batteryMenuMessage("Battery Manager - Stop recording", BatteryRecorder_ErrorString(err), NULL);
+        batteryMenuMessage(title, BatteryRecorder_ErrorString(err), NULL);
 }
 
 // Learning > Start recording / Stop recording #NNNN (one entry, the title shows which)
@@ -405,7 +527,7 @@ static void batteryMenuRecording(void)
     BatteryRecorderStatus st;
     BatteryRecorder_GetStatus(&st);
     if (st.recording)
-        batteryStopRecording();
+        batteryStopRecording(&st);
     else
         batteryStartRecording();
 }
@@ -413,109 +535,128 @@ static void batteryMenuRecording(void)
 // ---- Sessions ----
 
 static BatterySessionInfo g_sessions[BATTERY_MAX_LISTED_SESSIONS];
+static bool g_inCurve[BATTERY_MAX_LISTED_SESSIONS]; // same index as g_sessions: used by the loaded curve
 static u32 g_numSessions;
 
-static void batterySessionsRescan(void)
+// Reads and classifies all sessions (a few seconds for many long ones) and marks the ones in the loaded curve
+static void batterySessionsRescan(const char *title)
 {
     batteryMenuClear();
     Draw_Lock();
-    Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Sessions");
+    Draw_DrawString(10, 10, COLOR_TITLE, title);
     Draw_DrawString(10, 30, COLOR_WHITE, "Reading sessions...");
     Draw_FlushFramebuffer();
     Draw_Unlock();
 
     if (R_FAILED(BatterySessions_Scan(g_sessions, BATTERY_MAX_LISTED_SESSIONS, &g_numSessions)))
         g_numSessions = 0;
+
+    const BatteryCurveFile *curve = BatteryCurve_Snapshot();
+    for (u32 i = 0; i < g_numSessions; i++)
+    {
+        g_inCurve[i] = false;
+        for (u32 k = 0; curve != NULL && k < curve->numSessions; k++)
+            if (curve->sessions[k] == g_sessions[i].number)
+                g_inCurve[i] = true;
+    }
     batteryMenuClear();
 }
 
+// User-facing class names (the CSV, the docs and BatterySessions_ClassName keep complete / incomplete / invalid)
 static const char *batterySessionLabel(const BatterySessionInfo *info, const BatteryRecorderStatus *st)
 {
     if (st->recording && st->number == info->number)
         return "recording";
-    return BatterySessions_ClassName(info->cls);
+    switch (info->cls)
+    {
+        case BATTERY_SESSION_COMPLETE:  return "usable";
+        case BATTERY_SESSION_INVALID:   return "sleep gap";
+        default:                        return "partial";
+    }
 }
 
-static void batterySessionDetails(const BatterySessionInfo *info, const BatteryRecorderStatus *st)
+static const char *batteryEndReasonText(u8 reason)
+{
+    switch (reason)
+    {
+        case BATTERY_END_STOP:      return "stopped in the menu";
+        case BATTERY_END_CHARGER:   return "charger plugged in";
+        case BATTERY_END_SHUTDOWN:  return "console switched off";
+        case BATTERY_END_CUTOFF:    return "power lost (found at boot)";
+        case BATTERY_END_OTHER:     return "other";
+        default:                    return "none (not ended)";
+    }
+}
+
+static void batterySessionDetails(const BatterySessionInfo *info, bool inCurve, const BatteryRecorderStatus *st)
 {
     char dur[16];
+    char title[48];
     batteryFormatDuration(dur, info->durationMs);
+    sprintf(title, "Battery Manager - Session #%04lu", (u32)info->number);
 
-    batteryMenuClear();
-    do
-    {
-        Draw_Lock();
-        Draw_DrawFormattedString(10, 10, COLOR_TITLE, "Battery Manager - Session #%04lu", (u32)info->number);
-        u32 y = 30;
-        y = batteryMenuLine(y, COLOR_WHITE, "Class:       %s", batterySessionLabel(info, st));
-        y = batteryMenuLine(y, COLOR_WHITE, "End reason:  %s", BatterySessions_EndReasonName(info->endReason));
-        y = batteryMenuLine(y, COLOR_WHITE, "Sleep gap:   %s", info->hasSleepGap ? "yes" : "no");
-        y = batteryMenuLine(y, COLOR_WHITE, "Duration:    %s", dur);
-        y = batteryMenuLine(y, COLOR_WHITE, "Samples:     %lu", info->samples);
-        y = batteryMenuLine(y, COLOR_WHITE, "Start:       %lu.%lu%%", (u32)info->startPctX10 / 10, (u32)info->startPctX10 % 10);
-        y = batteryMenuLine(y, COLOR_WHITE, "End:         %lu.%lu%%", (u32)info->endPctX10 / 10, (u32)info->endPctX10 % 10);
-        y = batteryMenuLine(y, COLOR_WHITE, "File size:   %lu bytes", info->sizeBytes);
-        y += SPACING_Y;
-        y = batteryMenuLine(y, COLOR_WHITE, "complete = starts >= 95%%, ends by power-off,");
-        batteryMenuLine(y, COLOR_WHITE, "no sleep gap.");
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
-        Draw_FlushFramebuffer();
-        Draw_Unlock();
-    }
-    while (!(waitInput() & KEY_B) && !menuShouldExit);
-    batteryMenuClear();
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Result:      %s%s", batterySessionLabel(info, st), inCurve ? " (in the current curve)" : "");
+    batteryTextAdd(COLOR_WHITE, "End reason:  %s", batteryEndReasonText(info->endReason));
+    batteryTextAdd(COLOR_WHITE, "Sleep gap:   %s", info->hasSleepGap ? "yes" : "no");
+    batteryTextAdd(COLOR_WHITE, "Duration:    %s", dur);
+    batteryTextAdd(COLOR_WHITE, "Samples:     %lu", info->samples);
+    batteryTextAdd(COLOR_WHITE, "Start:       %3lu.%lu %% (stock gauge)", (u32)info->startPctX10 / 10, (u32)info->startPctX10 % 10);
+    batteryTextAdd(COLOR_WHITE, "End:         %3lu.%lu %% (stock gauge)", (u32)info->endPctX10 / 10, (u32)info->endPctX10 % 10);
+    batteryTextAdd(COLOR_WHITE, "File size:   %lu bytes", info->sizeBytes);
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "usable = starts at 95 %% or more, runs until the");
+    batteryTextAdd(COLOR_WHITE, "console switches itself off, no sleep.");
+    batteryTextAdd(COLOR_WHITE, "partial = stopped, charger plugged in, or");
+    batteryTextAdd(COLOR_WHITE, "started below 95 %%. sleep gap = the console");
+    batteryTextAdd(COLOR_WHITE, "slept during it: never usable.");
+    batteryTextShow(title, "Press B to go back.", KEY_B);
 }
 
 // Returns true if the session was deleted
-static bool batterySessionDelete(const BatterySessionInfo *info)
+static bool batterySessionDelete(const BatterySessionInfo *info, bool inCurve, const BatteryRecorderStatus *st)
 {
-    BatteryRecorderStatus st;
-    BatteryRecorder_GetStatus(&st);
-    if (st.recording && st.number == info->number)
+    static const char *const title = "Battery Manager - Delete";
+    if (st->recording && st->number == info->number)
     {
-        batteryMenuMessage("Battery Manager - Delete", "This session is being recorded.", "Stop recording first.");
-        batteryMenuClear();
+        batteryMenuMessage(title, "This session is being recorded.", "Stop recording first.");
         return false;
     }
 
-    batteryMenuClear();
-    u32 pressed = 0;
-    do
+    u32 m = info->durationMs / 60000;
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Delete session #%04lu (%lu:%02lu, %s)?", (u32)info->number, m / 60, m % 60,
+                   batterySessionLabel(info, st));
+    batteryTextAdd(COLOR_WHITE, "");
+    if (inCurve)
     {
-        Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Delete");
-        u32 y = batteryMenuLine(30, COLOR_WHITE, "Delete session #%04lu?", (u32)info->number);
-        batteryMenuLine(y + SPACING_Y, COLOR_WHITE, "A: delete    B: cancel");
-        Draw_FlushFramebuffer();
-        Draw_Unlock();
-        pressed = waitInput();
+        batteryTextAdd(COLOR_RED, "It is part of the current curve. The curve");
+        batteryTextAdd(COLOR_RED, "stays as it is until you build a new one.");
     }
-    while (!(pressed & (KEY_A | KEY_B)) && !menuShouldExit);
-
-    if (!(pressed & KEY_A))
-    {
-        batteryMenuClear();
+    batteryTextAdd(COLOR_WHITE, "The file is removed from the SD card.");
+    if (!batteryTextConfirm(title, "A: delete  B: cancel"))
         return false;
-    }
 
     Result res = BatterySessions_Delete(info->number);
     if (R_FAILED(res))
     {
         char line[32];
         sprintf(line, "Error 0x%08lx.", (u32)res);
-        batteryMenuMessage("Battery Manager - Delete", "Delete failed.", line);
-        batteryMenuClear();
+        batteryMenuMessage(title, "Delete failed.", line);
         return false;
     }
     return true;
 }
 
+// Learning > Sessions: newest first, Up/Down select, A details, Y delete (asks first), B back
 static void batteryMenuSessions(void)
 {
+    static const char *const title = "Battery Manager - Sessions";
     u32 selected = 0; // index in display order (newest first)
     u32 scroll = 0;
+    u32 deletedNumber = 0; // feedback line until the next key
 
-    batterySessionsRescan();
+    batterySessionsRescan(title);
 
     do
     {
@@ -526,39 +667,51 @@ static void batteryMenuSessions(void)
             selected = g_numSessions - 1;
         if (selected < scroll)
             scroll = selected;
-        else if (selected >= scroll + BATTERY_MENU_LIST_ROWS)
-            scroll = selected - BATTERY_MENU_LIST_ROWS + 1;
+        else if (selected >= scroll + BATTERY_SESSION_ROWS)
+            scroll = selected - BATTERY_SESSION_ROWS + 1;
+
+        bool anyInCurve = false;
+        for (u32 i = 0; i < g_numSessions; i++)
+            anyInCurve = anyInCurve || g_inCurve[i];
 
         Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Sessions");
+        Draw_DrawString(10, 10, COLOR_TITLE, title);
         u32 y = 30;
         if (g_numSessions == 0)
             y = batteryMenuLine(y, COLOR_WHITE, "No sessions in " BATTERY_SESSIONS_DIR);
+        else
+            y = batteryMenuLine(y, COLOR_TITLE, "  #     Result      Length  Battery (stock)");
 
-        for (u32 row = 0; row < BATTERY_MENU_LIST_ROWS; row++)
+        for (u32 row = 0; row < BATTERY_SESSION_ROWS; row++)
         {
             u32 i = scroll + row;
             if (i >= g_numSessions)
             {
-                if (g_numSessions != 0)
-                    y = batteryMenuLine(y, COLOR_WHITE, "");
+                y = batteryMenuLine(y, COLOR_WHITE, "");
                 continue;
             }
 
-            const BatterySessionInfo *info = &g_sessions[g_numSessions - 1 - i];
+            u32 k = g_numSessions - 1 - i;
+            const BatterySessionInfo *info = &g_sessions[k];
             u32 m = info->durationMs / 60000;
-            y = batteryMenuLine(y, COLOR_WHITE, "%c %04lu %-10s %3lu:%02lu %3lu.%lu->%3lu.%lu%%",
-                i == selected ? '>' : ' ', (u32)info->number, batterySessionLabel(info, &st),
+            y = batteryMenuLine(y, COLOR_WHITE, "%c %04lu  %-9s %c %3lu:%02lu  %3lu.%lu -> %3lu.%lu %%",
+                i == selected ? '>' : ' ', (u32)info->number, batterySessionLabel(info, &st), g_inCurve[k] ? '*' : ' ',
                 m / 60, m % 60,
                 (u32)info->startPctX10 / 10, (u32)info->startPctX10 % 10,
                 (u32)info->endPctX10 / 10, (u32)info->endPctX10 % 10);
         }
 
+        y += SPACING_Y;
+        if (deletedNumber != 0)
+            batteryMenuLine(y, COLOR_GREEN, "Session #%04lu deleted.", deletedNumber);
+        else
+            batteryMenuLine(y, COLOR_TITLE, anyInCurve ? "* in the current curve" : "");
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "A: details  Y: delete  B: back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
 
         u32 pressed = waitInput();
+        deletedNumber = 0;
         if (pressed & KEY_B)
             break;
         else if (g_numSessions == 0)
@@ -568,11 +721,19 @@ static void batteryMenuSessions(void)
         else if (pressed & KEY_UP)
             selected = (selected + g_numSessions - 1) % g_numSessions;
         else if (pressed & KEY_A)
-            batterySessionDetails(&g_sessions[g_numSessions - 1 - selected], &st);
-        else if (pressed & (KEY_X | KEY_Y))
         {
-            if (batterySessionDelete(&g_sessions[g_numSessions - 1 - selected]))
-                batterySessionsRescan();
+            u32 k = g_numSessions - 1 - selected;
+            batterySessionDetails(&g_sessions[k], g_inCurve[k], &st);
+        }
+        else if (pressed & KEY_Y) // only Y: X builds on the Build curve screen
+        {
+            u32 k = g_numSessions - 1 - selected;
+            u16 number = g_sessions[k].number;
+            if (batterySessionDelete(&g_sessions[k], g_inCurve[k], &st))
+            {
+                batterySessionsRescan(title);
+                deletedNumber = number;
+            }
         }
     }
     while (!menuShouldExit);
@@ -597,7 +758,7 @@ static void batteryCandidatesRefresh(void)
     BatteryRecorder_GetStatus(&st);
     const BatteryCurveFile *curve = BatteryCurve_Snapshot();
 
-    batterySessionsRescan(); // shows "Reading sessions..."
+    batterySessionsRescan("Battery Manager - Build curve"); // shows "Reading sessions..."
     BatteryCurve_SelectionLoad();
 
     g_numCandidates = 0;
@@ -638,7 +799,7 @@ static void batteryBuildProgress(u32 pass, u32 index, u32 count, u32 number)
     Draw_Unlock();
 }
 
-static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r)
+static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r, bool hadCurve)
 {
     const BatteryCurveFile *f = ok ? BatteryCurve_Snapshot() : NULL;
 
@@ -652,6 +813,8 @@ static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r)
         if (f != NULL)
         {
             y = batteryMenuLine(y, COLOR_GREEN, "Curve saved to " BATTERY_CURVE_PATH);
+            if (hadCurve)
+                y = batteryMenuLine(y, COLOR_WHITE, "The previous curve is kept as curve.bak.");
             y = batteryMenuLine(y, COLOR_WHITE, "Sessions used: %lu   Max spread: %lu.%02lu points",
                                 (u32)f->numSessions, (u32)f->maxSpreadX100 / 100, (u32)f->maxSpreadX100 % 100);
             if (f->numOutliers != 0)
@@ -669,15 +832,15 @@ static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r)
             if (f->numSessions > 6)
                 y = batteryMenuLine(y, COLOR_WHITE, "  ...");
 
-            // MCU % -> real % at a few points
+            // Stock gauge (MCU) % -> real % at a few points
             static const u8 points[] = { 50, 25, 10, 5, 2, 1 };
             u32 r10[sizeof(points)];
             for (u32 k = 0; k < sizeof(points); k++)
                 r10[k] = (u32)(BatteryCurve_Interp(f->mcuGridX10, f->mcuMean, BATTERY_CURVE_MCU_POINTS, points[k] * 10.0f) * 10.0f + 0.5f);
             y += SPACING_Y;
-            y = batteryMenuLine(y, COLOR_WHITE, "Real %% at MCU 50/25/10%%: %lu.%lu / %lu.%lu / %lu.%lu",
+            y = batteryMenuLine(y, COLOR_WHITE, "Stock 50/25/10 %% = real %lu.%lu / %lu.%lu / %lu.%lu %%",
                                 r10[0] / 10, r10[0] % 10, r10[1] / 10, r10[1] % 10, r10[2] / 10, r10[2] % 10);
-            y = batteryMenuLine(y, COLOR_WHITE, "Real %% at MCU 5/2/1%%:    %lu.%lu / %lu.%lu / %lu.%lu",
+            y = batteryMenuLine(y, COLOR_WHITE, "Stock  5/ 2/ 1 %% = real %lu.%lu / %lu.%lu / %lu.%lu %%",
                                 r10[3] / 10, r10[3] % 10, r10[4] / 10, r10[4] % 10, r10[5] / 10, r10[5] % 10);
         }
         else if (r->used == 0 && R_SUCCEEDED(r->res))
@@ -707,7 +870,45 @@ static void batteryBuildResult(bool ok, const BatteryCurveBuildResult *r)
     batteryMenuClear();
 }
 
-static void batteryBuildRun(void)
+// After the first curve: offer to switch the power LED to corrected (only a config change, through BatteryLed_SetConfig
+// like the Settings screen)
+static void batteryOfferPowerLed(void)
+{
+    static const char *const title = "Battery Manager - Power LED";
+    BatteryLedConfig cfg;
+    BatteryLed_EnsureConfigLoaded();
+    BatteryLed_GetConfig(&cfg);
+    if (cfg.override)
+        return;
+
+    batteryTextBegin();
+    batteryTextAdd(COLOR_GREEN, cfg.bars ? "The curve is ready; HOME Menu bars use it now." : "The curve is ready.");
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "Use it for the power LED too?");
+    batteryTextAdd(COLOR_WHITE, "Power LED: corrected = blue above %lu %%, solid", (u32)cfg.redPct);
+    batteryTextAdd(COLOR_WHITE, "red at %lu %% and below, blinking at %lu %% and", (u32)cfg.redPct, (u32)cfg.blinkPct);
+    batteryTextAdd(COLOR_WHITE, "below, always blue while charging.");
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "You can change this later in Settings.");
+    if (!batteryTextConfirm(title, "A: yes, turn on  B: later"))
+        return;
+
+    cfg.override = true;
+    Result res = BatteryLed_SetConfig(&cfg);
+    if (R_FAILED(res))
+    {
+        char line[48];
+        sprintf(line, "Error 0x%08lx.", (u32)res);
+        batteryMenuMessage(title, "Could not save config.ini.", line);
+        return;
+    }
+    batteryTextBegin();
+    batteryTextAdd(COLOR_GREEN, "Power LED: corrected.");
+    batteryTextShow(title, "Press B to go back.", KEY_B);
+}
+
+// Returns true if a build ran (the candidates need a refresh then)
+static bool batteryBuildRun(void)
 {
     u16 numbers[BATTERY_CURVE_MAX_SESSIONS];
     u32 count = 0;
@@ -720,8 +921,7 @@ static void batteryBuildRun(void)
         if (count == BATTERY_CURVE_MAX_SESSIONS)
         {
             batteryMenuMessage("Battery Manager - Build curve", "Too many sessions selected.", "Select at most 16.");
-            batteryMenuClear();
-            return;
+            return false;
         }
         numbers[count++] = g_candidates[i].number;
     }
@@ -729,15 +929,39 @@ static void batteryBuildRun(void)
     if (count == 0)
     {
         batteryMenuMessage("Battery Manager - Build curve", "No session selected.", NULL);
-        batteryMenuClear();
-        return;
+        return false;
     }
+
+    // Confirmation: the new curve replaces the current one at once; the current one is kept as curve.bak
+    const BatteryCurveFile *cur = BatteryCurve_Snapshot();
+    bool hadCurve = cur != NULL;
+    u32 curSessions = hadCurve ? cur->numSessions : 0;
+    batteryTextBegin();
+    if (hadCurve)
+    {
+        batteryTextAdd(COLOR_WHITE, "Build a new curve from %lu session%s?", count, count == 1 ? "" : "s");
+        batteryTextAdd(COLOR_WHITE, "It replaces the current one (%lu session%s) and", curSessions, curSessions == 1 ? "" : "s");
+        batteryTextAdd(COLOR_WHITE, "is used for the LED and bars right away.");
+        batteryTextAdd(COLOR_WHITE, "The current curve is kept as curve.bak");
+        batteryTextAdd(COLOR_WHITE, "(Advanced > Restore previous curve).");
+    }
+    else
+    {
+        batteryTextAdd(COLOR_WHITE, "Build a curve from %lu session%s?", count, count == 1 ? "" : "s");
+        batteryTextAdd(COLOR_WHITE, "It is used for the LED and bars right away.");
+    }
+    if (!batteryTextConfirm("Battery Manager - Build curve", "A: build  B: cancel"))
+        return false;
 
     batteryMenuClear();
     bool ok = BatteryCurve_Build(numbers, count, batteryBuildProgress, &r);
-    batteryBuildResult(ok, &r);
+    batteryBuildResult(ok, &r, hadCurve);
+    if (ok && !hadCurve)
+        batteryOfferPowerLed();
+    return true;
 }
 
+// Learning > Build curve: checklist of usable sessions, X builds (asks first)
 static void batteryMenuBuildCurve(void)
 {
     u32 selected = 0, scroll = 0;
@@ -763,14 +987,14 @@ static void batteryMenuBuildCurve(void)
         u32 y = 30;
         if (g_numCandidates == 0)
         {
-            y = batteryMenuLine(y, COLOR_WHITE, "No complete sessions yet.");
-            y = batteryMenuLine(y, COLOR_WHITE, "complete = starts >= 95%%, ends by power-off,");
-            y = batteryMenuLine(y, COLOR_WHITE, "no sleep gap.");
+            y = batteryMenuLine(y, COLOR_WHITE, "No usable sessions yet.");
+            y = batteryMenuLine(y, COLOR_WHITE, "usable = starts at 95 %% or more, runs until the");
+            y = batteryMenuLine(y, COLOR_WHITE, "console switches itself off, no sleep.");
         }
         else
         {
-            y = batteryMenuLine(y, COLOR_WHITE, "Complete sessions: %lu, selected: %lu (max 16)", g_numCandidates, numSelected);
-            y = batteryMenuLine(y, COLOR_WHITE, "");
+            y = batteryMenuLine(y, COLOR_WHITE, "Usable sessions: %lu, selected: %lu (max 16)", g_numCandidates, numSelected);
+            y = batteryMenuLine(y, COLOR_TITLE, "ends = stock gauge %% when it switched off");
         }
 
         for (u32 row = 0; row < BATTERY_MENU_LIST_ROWS - 2; row++)
@@ -791,7 +1015,7 @@ static void batteryMenuBuildCurve(void)
                                c->devX100 != 0xFFFF && c->devX100 > BATTERY_CURVE_OUTLIER_X100 ? "outlier" :
                                c->devX100 != 0xFFFF ? "in curve" : "";
             y = batteryMenuLine(y, c->highEnd || (c->devX100 != 0xFFFF && c->devX100 > BATTERY_CURVE_OUTLIER_X100) ? COLOR_RED : COLOR_WHITE,
-                "%c[%c] %04lu %3lu:%02lu end %3lu.%lu%% %s",
+                "%c[%c] %04lu %3lu:%02lu ends %3lu.%lu %% %s",
                 i == selected ? '>' : ' ', c->selected ? 'x' : ' ', (u32)c->number, m / 60, m % 60, e / 10, e % 10, flag);
         }
 
@@ -820,8 +1044,8 @@ static void batteryMenuBuildCurve(void)
             if (dirty)
                 BatteryCurve_SelectionSave();
             dirty = false;
-            batteryBuildRun();
-            batteryCandidatesRefresh(); // outlier flags of the new curve
+            if (batteryBuildRun())
+                batteryCandidatesRefresh(); // outlier flags of the new curve
         }
     }
     while (!menuShouldExit);
@@ -1060,14 +1284,8 @@ static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows
             sprintf(line, "Error 0x%08lx.", (u32)res);
             batteryMenuMessage(title, "Could not save config.ini.", line);
         }
-        else if (!menuShouldExit)
-        {
-            Draw_Lock();
-            Draw_DrawFormattedString(10, SCREEN_BOT_HEIGHT - 20, COLOR_GREEN, "%-*s", BATTERY_MENU_LINE_CHARS, "Saved.");
-            Draw_FlushFramebuffer();
-            Draw_Unlock();
-            svcSleepThread(700 * 1000 * 1000LL);
-        }
+        else
+            batteryFlashHint(COLOR_GREEN, "Saved.");
     }
     batteryMenuClear();
 }
@@ -1089,6 +1307,128 @@ static void batteryMenuBlueLedType(void)
 }
 
 // ---- Advanced ----
+
+// Advanced > Restore previous curve: curve.bak (kept by the last build or restore) becomes the curve again; the current
+// curve becomes curve.bak, so a second restore switches back
+static void batteryMenuRestoreCurve(void)
+{
+    static const char *const title = "Battery Manager - Restore previous curve";
+    u16 bakCount = 0, bakSessions[BATTERY_CURVE_MAX_SESSIONS];
+    char line[64];
+
+    const BatteryCurveFile *cur = BatteryCurve_Snapshot();
+    u32 curCount = cur != NULL ? cur->numSessions : 0;
+    bool haveCurve = cur != NULL;
+    if (!BatteryCurve_BackupInfo(&bakCount, bakSessions)) // overwrites the snapshot buffer: cur isn't used below
+    {
+        batteryMenuMessage(title, "There is no previous curve (curve.bak) yet.",
+                           "Building a new curve keeps the old one.");
+        return;
+    }
+
+    int n = sprintf(line, " ");
+    u32 k = 0;
+    for (; k < bakCount && n + 6 <= BATTERY_MENU_LINE_CHARS - 4; k++)
+        n += sprintf(line + n, " #%04lu", (u32)bakSessions[k]);
+    if (k < bakCount)
+        sprintf(line + n, " ...");
+
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Go back to the previous curve?");
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "Previous: %lu session%s", (u32)bakCount, bakCount == 1 ? "" : "s");
+    batteryTextAdd(COLOR_WHITE, "%s", line);
+    if (haveCurve)
+        batteryTextAdd(COLOR_WHITE, "Current:  %lu session%s", curCount, curCount == 1 ? "" : "s");
+    else
+        batteryTextAdd(COLOR_WHITE, "Current:  none");
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "It is used for the LED and bars right away.");
+    if (haveCurve)
+    {
+        batteryTextAdd(COLOR_WHITE, "The current curve becomes the previous one,");
+        batteryTextAdd(COLOR_WHITE, "so you can switch back the same way.");
+    }
+    if (!batteryTextConfirm(title, "A: restore  B: cancel"))
+        return;
+
+    Result res = 0;
+    u8 r = BatteryCurve_RestoreBackup(&res);
+    if (r == BATTERY_CURVE_RESTORE_OK)
+    {
+        batteryTextBegin();
+        batteryTextAdd(COLOR_GREEN, "Previous curve restored (%lu session%s).", (u32)bakCount, bakCount == 1 ? "" : "s");
+        batteryTextShow(title, "Press B to go back.", KEY_B);
+    }
+    else if (r == BATTERY_CURVE_RESTORE_NO_BACKUP)
+        batteryMenuMessage(title, "curve.bak is missing or invalid.", "Nothing was changed.");
+    else if (r == BATTERY_CURVE_RESTORE_SD_ERROR)
+    {
+        sprintf(line, "SD error 0x%08lx.", (u32)res);
+        batteryMenuMessage(title, "Could not restore the curve.", line);
+    }
+    else
+        batteryMenuMessage(title, "Written, but curve.bin doesn't load back.", NULL);
+}
+
+// ---- Setup guide ----
+
+// Static steps, ticked from the current state. A loaded curve means steps 1-4 are done (it can only be built from usable
+// sessions); otherwise the sessions are scanned for a usable one (same "Reading sessions..." as the Sessions screen).
+static void batteryMenuSetupGuide(void)
+{
+    static const char *const title = "Battery Manager - Setup guide";
+    BatteryRecorderStatus st;
+    BatteryLedConfig cfg;
+    BatteryMcuSample s;
+
+    BatteryRecorder_GetStatus(&st);
+    BatteryLed_EnsureConfigLoaded();
+    BatteryLed_GetConfig(&cfg);
+    bool haveCurve = BatteryCurve_IsLoaded();
+    bool usable = haveCurve;
+    if (!haveCurve)
+    {
+        batterySessionsRescan(title);
+        for (u32 i = 0; i < g_numSessions && !usable; i++)
+            usable = g_sessions[i].cls == BATTERY_SESSION_COMPLETE && !(st.recording && st.number == g_sessions[i].number);
+    }
+    bool full = R_SUCCEEDED(BatteryMcu_ReadSample(&s)) && !(s.flags & BATTERY_MCU_FLAG_ADAPTER) &&
+                BatterySessions_StartCheck(BatteryMcu_PercentX10(s.pctInt, s.pctFrac), false) == BATTERY_START_OK;
+
+    bool done[5] = {
+        usable || st.recording || full,
+        usable || st.recording,
+        usable,
+        haveCurve,
+        cfg.override,
+    };
+
+#define STEP(i, text) batteryTextAdd(done[i] ? COLOR_GREEN : COLOR_WHITE, "[%c] %lu %s", done[i] ? 'x' : ' ', (u32)(i) + 1, text)
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Your battery's real charge differs from what");
+    batteryTextAdd(COLOR_WHITE, "the console shows. This learns the real curve.");
+    batteryTextAdd(COLOR_WHITE, "");
+    STEP(0, "Charge to 100 %, then unplug.");
+    STEP(1, "Learning > Start recording.");
+    STEP(2, "Play until it switches itself off");
+    batteryTextAdd(done[2] ? COLOR_GREEN : COLOR_WHITE, "      (no sleep, no charger; several hours).");
+    STEP(3, "Switch on, Learning > Build curve.");
+    STEP(4, "Settings > Power LED: corrected.");
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "HOME Menu bars switch over by themselves");
+    batteryTextAdd(COLOR_WHITE, "once a curve exists. More discharges make");
+    batteryTextAdd(COLOR_WHITE, "the curve more accurate.");
+    if (st.recording)
+    {
+        char dur[16];
+        batteryFormatDuration(dur, st.elapsedMs);
+        batteryTextAdd(COLOR_WHITE, "");
+        batteryTextAdd(COLOR_TITLE, "Recording session #%04lu (%s).", (u32)st.number, dur);
+    }
+#undef STEP
+    batteryTextShow(title, "Press B to go back.", KEY_B);
+}
 
 // Advanced > Limits and about: static text (docs 14.10, 15.10)
 static void batteryMenuAbout(void)
