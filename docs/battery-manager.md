@@ -19,7 +19,8 @@ red only appear when the battery is actually low.
 > that HOME Menu's battery bars follow the corrected % too (default on, level held while charging); **tested on
 > hardware** (15.11).
 > [Section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak) reorganises the menu (one Settings
-> screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **not yet tested on hardware**.
+> screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **tested on hardware**. The home
+> screen with a live summary and the paged Diagnostics (16.11–16.15) are **not yet tested on hardware**.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -96,7 +97,7 @@ MCU interrupts (reg `0x10–0x13`): bit13 fires on battery % status change at
 the LED back.
 
 > Note: Rosalina computes voltage as `0.02 * reg` (5.12/256), while 3dbrew says 5/256.
-> The difference is tiny. Confirm on hardware.
+> The difference is 2.4 % (3.70 V vs 3.613 V at raw 185). Still open; how the menus handle it: 16.13.
 
 ### 2.4 Existing code to build on (Luma3DS v13.5)
 
@@ -161,10 +162,12 @@ the LED back.
 
 ### 4.2 Menu
 
-Current tree (since [section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak)):
+Current tree (since [section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak), home screen and
+Diagnostics pages since 16.11):
 
 ```
-Battery Manager...
+Battery Manager...           home screen (16.11): live summary (battery %, charger, Power LED, HOME bars, Sleep LED,
+│                            curve, recording), a "Next:" hint, then the four entries (Up/Down, A opens, B back)
 ├─ Settings                  one editor: Power LED, Sleep LED, HOME Menu bars, Red LED at, Blinking red at,
 │                            4 bars from, 3 bars from (Left/Right change, SELECT undo, B save and back)
 ├─ Learning...
@@ -174,7 +177,8 @@ Battery Manager...
 │  └─ Curve graph            corrected curve vs stock (diagonal) + min/max band
 ├─ Setup guide               five steps, ticked from the current state
 └─ Advanced...
-   ├─ Diagnostics            the former Status screen: raw gauge, LED, ptm patch and recorder values
+   ├─ Diagnostics            the former Status screen in 3 pages (Left/Right or L/R): 1 gauge and LED, 2 Sleep LED
+   │                         and ptm patches, 3 recorder and curve (16.12)
    ├─ LED test               write each LED mode by hand, with read-back
    ├─ Blue LED type          blue_mode 5 (red off, blue on, default) / 1 (forced blue), same editor as Settings
    ├─ Restore previous curve curve.bak ↔ curve.bin
@@ -259,7 +263,8 @@ Original plan below; the implementation is described in [section 12](#12-led-con
   between samples while blinking (session 0001).
 - [x] Is a clean end line written when the console powers itself off at 0 %?
   **Yes**: `# end reason=shutdown` (session 0001).
-- [ ] Voltage scale: 5/256 or 5.12/256? Still open (needs a multimeter reading).
+- [ ] Voltage scale: 5/256 or 5.12/256? Still open (needs a multimeter reading). Diagnostics shows both, user
+  screens use 0.02 (16.13).
 - [ ] What is `0x7F[5]` (RCOMP?) on this console?
 - [ ] How wide is the spread between light / normal / heavy sessions?
 
@@ -835,8 +840,8 @@ Since section 16 (tree in 4.2):
 - **Advanced > LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
   read-back and the red / blue state (refreshed 4× per second). Normal control pauses while the
   screen is open and is restored on exit.
-- **Advanced > Diagnostics** (formerly Status): corrected % (the LED's input, with the median voltage), `LED
-  control: ON (reason)` (`active`, `no curve`, `charger`, `lid closed`, …, `fast poll`; just `OFF` when off),
+- **Advanced > Diagnostics** (formerly Status; three pages since 16.12): corrected % (the LED's input, with the
+  median voltage), `LED control: ON (reason)` (`active`, `no curve`, `charger`, `lid closed`, …, `fast poll`; just `OFF` when off),
   desired and read-back mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last
   one), the `Sleep:` diagnostics line (12.11), the `ptm patch:` line (14.5), the `bars patch:` line (15.6),
   errors. The temperature follows Rosalina's °C / °F setting.
@@ -1797,7 +1802,8 @@ A UX review of the menu found settings that changed as soon as their entry was o
 charging", "only gets better while charging"), raw terms on user screens ("override", "mode 5", "MCU"), clipped
 Status lines, a Build curve that overwrote the curve without asking, and an undocumented X that deleted sessions.
 This section is UI only: the LED, sleep, ptm and bars logic, the `config.ini` keys and defaults (LED override still
-**off** by default), the CSV format and `curve.bin` v1 are unchanged. **Not yet tested on hardware.**
+**off** by default), the CSV format and `curve.bin` v1 are unchanged. 16.1–16.9 are **tested on hardware**; the home
+screen, the Diagnostics pages and the voltage change (16.11–16.15) are **not yet tested on hardware**.
 
 ### 16.1 Tree
 
@@ -1942,3 +1948,208 @@ ptm patch site or value, no menu code calling `BatteryPtmPatch_Apply` / `Battery
 From the review, left for a later round: a custom Battery Manager home screen with a summary block, Diagnostics
 in pages (which would also give room to show the LED error and the boot timings at the same time, now one slot)
 and one voltage formula on user screens (Diagnostics shows `raw × 5/256`, the footer Rosalina's `raw × 0.02`).
+All three are done in 16.11–16.13.
+
+### 16.11 Home screen
+
+The Rosalina entry `Battery Manager...` is now a `METHOD` (`BatteryMenu_Home`) instead of a `MENU`: a custom screen
+with a live summary, a hint, and the four former main-menu entries. Example (curve, Power LED corrected):
+
+```
+Battery Manager
+
+ Battery      29.9 %       (stock gauge 3.6 %)
+ Charger      no
+ Power LED    blue         corrected
+ HOME bars    2 of 4       corrected
+ Sleep LED    dim blue
+ Curve        3 sessions
+ Recording    off
+
+
+
+
+> Settings
+  Learning...
+  Setup guide
+  Advanced...
+
+
+A: open  B: back                        3.70V 25°C
+```
+
+First run (defaults: no curve, Power LED stock), with the hint in teal:
+
+```
+ Battery      72.4 %       (stock, not corrected)
+ Charger      no
+ Power LED    stock        (console's own)
+ HOME bars    stock        (needs a curve)
+ Sleep LED    dim blue     (needs Power LED)
+ Curve        none yet
+ Recording    off
+
+ Next: charge to 100 %, unplug, record a full
+       discharge, then Learning > Build curve.
+```
+
+- **Rows** (`BatteryHome_Summary`, pure): `" <label 13><value 12> <note>"`, at most 49 characters. Battery = the corrected %
+  (the LED's value, median voltage; instantaneous before the LED thread's first poll, as in Diagnostics) with the
+  stock gauge in brackets, or the stock gauge marked "not corrected" without a curve. Charger = no / charging /
+  plugged in (not charging). Power LED = what the LED shows (blue / red / blinking red) and `corrected`, `corrected,
+  charging`, `stock (console's own)`, `stock (needs a curve)` in teal, `error (see Diagnostics)` in red. HOME bars =
+  `4 of 4` … `1 (red)`, `1 (blinking)` with `corrected` or `corrected, held` (charging), `stock`, `stock (needs a
+  curve)`, `stock (see Diagnostics)` when the bars patch is off or failing. Sleep LED = the setting, in teal with
+  `(needs Power LED)` while the Power LED is stock, `(see Diagnostics)` when the sleep patch is off. Curve = number
+  of sessions or `none yet`. Recording = `off` or `#0005  1:23:05`, red with `sleep gap` / `SD errors`.
+- **Next:** (`BatteryHome_NextStep`, pure; first match): LED control error → see Diagnostics (red); recording →
+  "don't close the lid or charge"; no curve → at ≥ 95 % on the battery "Learning > Start recording", otherwise
+  "charge to 100 %, unplug, record a full discharge, then Build curve"; curve but Power LED stock → "Settings >
+  Power LED: corrected"; else no hint. The home screen doesn't scan the session files (that takes seconds), so it
+  can't tell whether a usable session already exists; the hint always mentions Build curve, and the Setup guide
+  (which scans) ticks the steps.
+- **Hint row**: `A: open  B: back` and, right-aligned in a fixed 11-character field, the voltage and temperature in
+  the footer's scale and unit (`BatteryMenu_FormatVoltTemp`), so the home screen and the footer agree (16.13).
+- **Navigation**: Up/Down (wrapping, key repeat as in Rosalina menus), A opens, B goes back to the Rosalina menu.
+  The cursor starts on Settings and is kept when an entry returns.
+- **Redraw**: every second (`waitInputWithTimeout(1000)`, like Diagnostics); every row is padded to 49
+  characters and the rows have fixed positions (7 summary rows, blank, 2 hint rows, blank, 4 entries, rest blank),
+  so nothing is left over when a value gets shorter or the hint disappears. 15 of the 17 body lines are used.
+- **Embedding the submenus**: Settings and Setup guide are called directly (they were `METHOD`s already).
+  Learning... and Advanced... are opened with `menuShow(&batteryLearningMenu)` / `menuShow(&batteryAdvancedMenu)`
+  on the unchanged `Menu` structs: Rosalina's own menu loop draws them, with the same items, the dynamic Start /
+  Stop recording title, the footer and the same keys; B at their top level returns from `menuShow` (it waits for B
+  to be released, so the home screen doesn't see the same press) and the home screen redraws. This is the
+  simplest way to keep them exactly as before: no copy of Rosalina's menu code. Cost: one more `menuShow` frame
+  (about 1 KB) on the 12 KB menu thread stack; the home screen keeps its data in a static struct (72 bytes of
+  stack). A nested `menuShow` resets Rosalina's internal "close the menu" request; no Battery Manager item makes
+  one.
+- Reads only: the MCU sample (as Diagnostics does), the LED / recorder / ptm / bars status getters,
+  `BatteryCurve_Snapshot`, and `BatteryLed_EnsureConfigLoaded` once on entry (as Settings does).
+
+### 16.12 Diagnostics in three pages
+
+Left / Right or L / R switch pages (wrapping); the page is in the title; refreshed every second as before; each
+page is padded to the 17 body lines and the screen is cleared on a page change, so no line of another page stays.
+
+```
+Diagnostics 1/3 - Gauge and LED
+
+MCU charge:     3.6%  (stock gauge)
+Corrected:      29.9%  (volt median 185.0 raw)
+Voltage:        raw 185 = 3.613V (x5/256)
+                        = 3.70V (x0.02, footer)
+Temp: 25°C  Adapter: no  Charging: no
+Vendor: 0  RCOMP: 0x..  MGIC: 1.2
+
+LED control:    ON  (active)
+LED desired:    blue(5)   actual(0x29): 5
+Red LED: off  Blue: 255  Written: blue(5)
+Reasserts:      0 boot/0 session
+LED writes:     3 ok, 0 failed
+LED error:      none
+Boot s:         Rosalina 4.9, SD 5.1
+First s:        MCU read 5.0, LED 5.0
+```
+
+```
+Diagnostics 2/3 - Sleep LED and ptm patches
+
+Sleep setting:  dim blue
+Last sleep:     wrote 1 / wake read 1, n=3
+
+Sleep / wake LED patch (ptm):
+  sleep 01 wake 05 (active), writes 2
+  checks 7
+
+HOME Menu bars patch (ptm):
+  fed L=3 (shared 3), writes 4
+  decided L=3 (fed), checks 12
+
+ptm title ID:   0004013020002202
+```
+
+```
+Diagnostics 3/3 - Recorder and curve
+
+Recorder:       idle
+Last:           #0004, 6:41:10, 2406 samples
+
+Sleep gap:      no
+Errors:         0 read, 0 write (0x00000000)
+
+Curve:          3 sessions, max spread 1.20
+Sessions:       #0001 #0002 #0003
+Outliers:       0 (deviation > 5 points)
+Backup:         curve.bak, 2 sessions
+```
+
+- Every value of the former single screen is kept (same format strings and colours, the patch lines without the
+  `ptm patch:` / `bars patch:` prefix under a heading). Lines that shared a slot now have their own: the LED error,
+  the write failure count and the boot timings (**B17**: an LED error no longer hides the boot timings), the sleep
+  gap and the recorder errors.
+- New raw values that now fit: successful LED writes, the first MCU read time, both patches' check counts, the
+  bars decision (level and reason), the ptm title ID (read by the patch checks), the curve's session numbers and
+  outliers, and whether a valid `curve.bak` exists (read once when Diagnostics opens, not every second).
+- Diagnostics keeps showing °C / °F like the footer (16.6).
+
+### 16.13 Voltage: two scales, one on user screens (open question)
+
+MCU register `0x0D` is a raw byte. 3dbrew gives `raw × 5/256` V; upstream Rosalina's footer uses `raw × 0.02` V
+(= 5.12/256). They differ by 2.4 % (raw 185: 3.613 V vs 3.70 V; full ~205: 4.004 V vs 4.10 V; shutdown 155:
+3.027 V vs 3.10 V). Neither is confirmed: settling it needs a multimeter reading at the battery next to the raw
+value (section 6). Until then:
+
+- **Diagnostics** shows the raw value and both scales, labelled (`raw 185 = 3.613V (x5/256)` / `= 3.70V (x0.02,
+  footer)`).
+- **User screens** (the Rosalina footer and the Battery Manager home screen) use one scale: **`raw × 0.02`**, the
+  upstream Rosalina one, so the footer reads the same as in official Luma3DS and the two screens agree. Both go
+  through `BatteryMcu_VoltageCv(raw) = raw × 2` (centivolts, exact in integers). The footer's former float code
+  (`0.02f × raw`, rounded, then `(u32)(v × 100) % 100`) printed 0.01 V too little for 14 of the 256 raw values,
+  among them 209 / 210 (4.17 / 4.19 instead of 4.18 / 4.20 V near full); the integer version doesn't (host test).
+- The **CSV** keeps `volt = raw × 5/256` (format unchanged), and nothing computes with volts: the curve, the LED and
+  the bars use the raw byte only. If the multimeter says 5/256, only `BatteryMcu_VoltageCv` and the labels change.
+
+### 16.14 Code, host tests, safety
+
+| File | Change |
+|---|---|
+| `source/battery/battery_menu_logic.c`, `include/battery/battery_menu_logic.h` | new, pure: home summary rows, "Next:" decision and texts, Diagnostics titles and voltage lines, volt / temperature / duration formatting |
+| `source/battery/battery_menu.c` | `BatteryMenu_Home`, Diagnostics in three pages, `batteryMenuPadBody`; `batteryMenu` replaced by the home entries |
+| `include/battery/battery_menu.h` | `BatteryMenu_Home` instead of `batteryMenu` |
+| `source/menus.c` | the entry is a `METHOD` |
+| `include/battery/battery_mcu.h` | `BatteryMcu_VoltageCv` |
+| `source/menu.c` | footer voltage from the raw byte through `BatteryMcu_VoltageCv` |
+
+Host test `menu_host_test` (in `tests/battery/run_host_test.sh`): 500 000+ home inputs (every LED reason × mode ×
+error, every bars level × reason × patch state, every Sleep LED setting, and a random walk with the widest numbers)
+give 7 lines of at most 49 characters, none cut, with the value and note columns in place; the expected texts for
+the documented states; the "Next:" decision table and its texts; the three page titles; both voltage lines for
+all 256 raw values (≤ 49 characters, `=` lined up); `BatteryMcu_VoltageCv` against the old float footer code; the
+volt / temperature string at most 11 characters.
+
+Safety: no new MCU write (`BatteryMcu_SetPowerLedMode` is still the only one, from `battery_led.c`), no new ptm patch
+site or value, no menu code calling `BatteryPtmPatch_Apply` / `BatteryBars_Apply`, no new SD path (the home screen
+reads nothing from SD; Diagnostics reads the existing `curve.bak` once through `BatteryCurve_BackupInfo`), nothing on
+NAND or firmware. The home screen and Diagnostics only read; settings still change only through the Settings screen
+and `BatteryLed_SetConfig`.
+
+### 16.15 On-device test plan (home screen, Diagnostics pages)
+
+1. Rosalina > Battery Manager... opens the home screen; the summary values match Diagnostics (corrected %, stock
+   gauge, charger) and the footer of the Rosalina menu (voltage, temperature; also in °F).
+2. Leave it open for a minute: values update every second, no leftover characters (e.g. stock gauge 10.0 → 9.9 %,
+   plug the charger in and out: `Charger` and `Power LED ... corrected, charging` come and go cleanly).
+3. Up/Down wraps, A opens each entry, B returns to the home screen with the cursor kept; B on the home screen
+   returns to the Rosalina menu.
+4. Learning... and Advanced... behave exactly as before (items, Start / Stop recording title ticking, footer,
+   B back to the home screen, not to the Rosalina menu). Settings save as before (`Saved.`), and the home screen
+   then shows the new Power LED / bars / Sleep LED values.
+5. Hints: with Power LED stock and a curve → `Next: Settings > Power LED: corrected ...`; turn it on → no hint;
+   start a recording → `Recording: don't close the lid or charge ...` and the Recording row shows `#NNNN h:mm:ss`;
+   with no curve (rename `curve.bin` on the SD card, reboot) → the charge / record hint; restore it afterwards.
+6. Sleep LED row in teal `(needs Power LED)` while the Power LED is stock.
+7. Advanced > Diagnostics: Left/Right and L/R switch 1/3 → 2/3 → 3/3 → 1/3 (and back), the title shows the page,
+   no line of another page remains; every value of the former screen is there (compare with 12.7, 14.5, 15.6).
+   Page 1: both voltages; the boot and first-write timings show even while `LED error` is not `none`.
+8. The footer now shows 4.20 V (not 4.19 V) when Diagnostics says raw 210.
