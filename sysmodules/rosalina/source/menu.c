@@ -40,6 +40,7 @@
 #include "menus/screen_filters.h"
 #include "shell.h"
 #include "battery/battery_led.h"
+#include "battery/battery_mcu.h"
 
 //#define ROSALINA_MENU_SELF_SCREENSHOT 1 // uncomment this to enable the feature
 
@@ -200,7 +201,7 @@ static u8 CTR_ALIGN(8) menuThreadStack[0x3000];
 static bool menuCloseRequested = false;
 
 static float batteryPercentage;
-static float batteryVoltage;
+static u8 batteryVoltageRaw; // MCU 0x0D
 static u8 batteryTemperature;
 
 static Result menuUpdateMcuInfo(void)
@@ -233,9 +234,9 @@ static Result menuUpdateMcuInfo(void)
         batteryPercentage = data[1] + data[2] / 256.0f;
         batteryPercentage = (u32)((batteryPercentage + 0.05f) * 10.0f) / 10.0f;
 
-        // Round battery voltage to 0.01V
-        batteryVoltage = 0.02f * data[3];
-        batteryVoltage = (u32)((batteryVoltage + 0.005f) * 100.0f) / 100.0f;
+        // Battery voltage in 0.01V: raw * 0.02V, in integers (Battery Manager, docs/battery-manager.md 16.13: the float
+        // version showed e.g. 4.19V for raw 210)
+        batteryVoltageRaw = data[3];
     }
 
     // Read mcu fw version if not already done
@@ -497,8 +498,9 @@ static void menuDraw(Menu *menu, u32 selected)
 
     if(mcuInfoRes == 0)
     {
-        u32 voltageInt = (u32)batteryVoltage;
-        u32 voltageFrac = (u32)(batteryVoltage * 100.0f) % 100u;
+        u32 voltageCv = BatteryMcu_VoltageCv(batteryVoltageRaw);
+        u32 voltageInt = voltageCv / 100u;
+        u32 voltageFrac = voltageCv % 100u;
         u32 percentageInt = (u32)batteryPercentage;
         u32 percentageFrac = (u32)(batteryPercentage * 10.0f) % 10u;
 
