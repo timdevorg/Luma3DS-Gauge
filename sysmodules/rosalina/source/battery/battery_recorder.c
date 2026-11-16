@@ -55,6 +55,11 @@ static struct
     u32 writeErrors;
     Result lastWriteRes;
     u32 reassertBase;   // LED re-assert counter (per boot) when the session started
+    bool endPending;    // the end line isn't on SD yet (write failed): retried, state file not idle until it is
+    bool endStateWritten; // ... and the state file says "ending=NNNN reason=..." (boot recovery uses that reason)
+    const char *endReason;
+    u64 nextEndRetryMs;
+    u32 lostLines;      // buffered lines dropped because the SD kept failing (this session)
     char path[40];
     u32 bufLines;
     u32 bufLen;
@@ -94,10 +99,13 @@ static void batteryAppendLocked(const char *line, u32 len)
 {
     if (g_rec.bufLen + len > sizeof(g_rec.buf))
     {
-        // SD keeps failing: drop what we have rather than block the recorder
+        // SD keeps failing: drop what we have rather than block the recorder. The buffer then starts with a
+        // "# lost lines=<n>" marker (a comment: ignored by the session parser, the curve builder and build_curve.py),
+        // so the CSV shows where data is missing.
         if (R_FAILED(batteryFlushLocked()))
         {
-            g_rec.bufLen = 0;
+            g_rec.lostLines += g_rec.bufLines;
+            g_rec.bufLen = (u32)sprintf(g_rec.buf, "# lost lines=%lu\n", g_rec.bufLines);
             g_rec.bufLines = 0;
         }
     }
@@ -116,18 +124,42 @@ static void batteryWriteStateIdle(void)
     BatteryFs_WriteWhole(BATTERY_STATE_PATH, idle, sizeof(idle) - 1);
 }
 
+// Writes the pending end line (with what is left in the buffer). Only once it is on SD is the state file set to idle
+// (F3): before, a failed write still marked the state idle, so the CSV had no end line, no boot recovery ran, and a
+// stopped / charger session was later classed like a power-off (usable for the curve). While it fails: retried by the
+// thread and before the next start, and the state file is set to "ending=NNNN reason=..." if that small write works,
+// so a reboot first writes the right end line instead of "cutoff". g_rec.lock must be held.
+static void batteryFinishEndLocked(void)
+{
+    if (R_SUCCEEDED(batteryFlushLocked()))
+    {
+        g_rec.endPending = false;
+        // Written after the end line: if we die in between, the boot recovery sees the end line and does nothing
+        batteryWriteStateIdle();
+        return;
+    }
+
+    g_rec.nextEndRetryMs = batteryNowMs() + BATTERY_SAMPLE_INTERVAL_MS;
+    if (!g_rec.endStateWritten)
+    {
+        char state[48];
+        int n = sprintf(state, "ending=%04lu reason=%s\n", (u32)g_rec.number, g_rec.endReason);
+        g_rec.endStateWritten = R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_STATE_PATH, state, (u32)n));
+    }
+}
+
 static void batteryEndLocked(const char *reason)
 {
     char line[48];
     int n = sprintf(line, "# end reason=%s\n", reason);
     batteryAppendLocked(line, (u32)n);
-    batteryFlushLocked();
 
     g_rec.lastElapsedMs = (u32)(batteryNowMs() - g_rec.startTick);
     g_rec.recording = false;
-
-    // Written after the end line: if we die in between, the boot recovery sees the end line and does nothing
-    batteryWriteStateIdle();
+    g_rec.endPending = true;
+    g_rec.endStateWritten = false;
+    g_rec.endReason = reason; // a string literal
+    batteryFinishEndLocked();
 }
 
 static int batteryFormatSample(char *out, const BatteryMcuSample *s, u64 tMs, s64 wallMs)
@@ -264,6 +296,17 @@ BatteryRecorderError BatteryRecorder_Start(u16 *outNumber, Result *outRes)
         err = BATTERY_REC_SHUTTING_DOWN;
         goto end;
     }
+    if (g_rec.endPending)
+    {
+        // The previous session's end line isn't on SD yet: try once more, a new session would reuse the buffer
+        batteryFinishEndLocked();
+        if (g_rec.endPending)
+        {
+            res = g_rec.lastWriteRes;
+            err = BATTERY_REC_SD_FAILED;
+            goto end;
+        }
+    }
 
     res = BatteryMcu_ReadSample(&s);
     if (R_FAILED(res))
@@ -336,6 +379,7 @@ BatteryRecorderError BatteryRecorder_Start(u16 *outNumber, Result *outRes)
     g_rec.readErrors = 0;
     g_rec.writeErrors = 0;
     g_rec.lastWriteRes = 0;
+    g_rec.lostLines = 0;
     BatteryLedStatus led;
     BatteryLed_GetStatus(&led);
     g_rec.reassertBase = led.reasserts;
@@ -382,6 +426,8 @@ void BatteryRecorder_GetStatus(BatteryRecorderStatus *out)
     out->lastWriteRes = g_rec.lastWriteRes;
     out->recoveredNumber = g_rec.recoveredNumber;
     out->reassertBase = g_rec.reassertBase;
+    out->endPending = g_rec.endPending;
+    out->lostLines = g_rec.lostLines;
     LightLock_Unlock(&g_rec.lock);
 }
 
@@ -404,8 +450,8 @@ const char *BatteryRecorder_ErrorString(BatteryRecorderError err)
 
 // ---- Thread ----
 
-// Boot: if the state file still says "recording=NNNN", that session was cut off without notice.
-// g_rec.lock must be held.
+// Boot: if the state file still says "recording=NNNN", that session was cut off without notice; "ending=NNNN reason=R":
+// its end line couldn't be written. g_rec.lock must be held.
 static void batteryRecoverCutoffSessionLocked(void)
 {
     char state[32];
@@ -417,12 +463,33 @@ static void batteryRecoverCutoffSessionLocked(void)
         return;
     state[len] = 0;
 
-    if (strncmp(state, "recording=", 10) != 0 || state[10] < '0' || state[10] > '9')
+    // "recording=NNNN": cut off. "ending=NNNN reason=R": it had ended (stop / charger / shutdown) but the end line
+    // couldn't be written (batteryFinishEndLocked): that reason is used instead of "cutoff".
+    const char *p;
+    const char *reason = "cutoff";
+    bool ending = strncmp(state, "ending=", 7) == 0;
+    if (strncmp(state, "recording=", 10) == 0)
+        p = state + 10;
+    else if (ending)
+        p = state + 7;
+    else
+        return;
+    if (*p < '0' || *p > '9')
         return;
 
     u32 number = 0;
-    for (const char *p = state + 10; *p >= '0' && *p <= '9'; p++)
+    for (; *p >= '0' && *p <= '9'; p++)
         number = 10 * number + (u32)(*p - '0');
+    if (ending)
+    {
+        static const char *const reasons[] = { "stop", "charger", "shutdown" };
+        for (u32 i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++)
+        {
+            u32 l = strlen(reasons[i]);
+            if (strncmp(p, " reason=", 8) == 0 && strncmp(p + 8, reasons[i], l) == 0 && (p[8 + l] == '\n' || p[8 + l] == 0))
+                reason = reasons[i];
+        }
+    }
 
     if (number != 0 && number <= BATTERY_MAX_SESSION_NUMBER)
     {
@@ -434,10 +501,10 @@ static void batteryRecoverCutoffSessionLocked(void)
             {
                 // Lines may contain NULs if the FS didn't finish its last write; that only hides an end line,
                 // which would at worst produce a second end line (the parser keeps the last one).
-                static const char endLine[] = "\n# end reason=cutoff\n";
+                char endLine[40];
                 bool needsNewline = len != 0 && tail[len - 1] != '\n';
-                const char *p = needsNewline ? endLine : endLine + 1;
-                BatteryFs_Append(path, p, strlen(p));
+                int n = sprintf(endLine, "%s# end reason=%s\n", needsNewline ? "\n" : "", reason);
+                BatteryFs_Append(path, endLine, (u32)n);
             }
 
             g_rec.recoveredNumber = (u16)number;
@@ -453,6 +520,8 @@ static void batteryRecorderTick(void)
     LightLock_Lock(&g_rec.lock);
 
     u64 nowMs = batteryNowMs();
+    if (g_rec.endPending && nowMs >= g_rec.nextEndRetryMs)
+        batteryFinishEndLocked();
     if (g_rec.recording && nowMs >= g_rec.nextSampleTick)
     {
         BatteryMcuSample s;
@@ -496,6 +565,8 @@ static void batteryRecorderThreadMain(void)
     LightLock_Lock(&g_rec.lock);
     if (g_rec.recording)
         batteryEndLocked("shutdown");
+    else if (g_rec.endPending)
+        batteryFinishEndLocked(); // last try for an earlier end line
     LightLock_Unlock(&g_rec.lock);
 }
 

@@ -453,7 +453,10 @@ static u32 batteryDiagRecorderCurve(u32 y, const BatteryDiagData *d, const Batte
             y = batteryMenuLine(y, COLOR_WHITE, "Last:           #%04lu, %s, %lu samples", (u32)st->number, dur, st->samples);
         else
             y = batteryMenuLine(y, COLOR_WHITE, "Last:           none this boot");
-        y = batteryMenuLine(y, COLOR_WHITE, "");
+        if (st->endPending) // its end line couldn't be written yet (the recorder retries)
+            y = batteryMenuLine(y, COLOR_RED, "End line:       not on SD yet, retrying");
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "");
     }
     // Sleep gap and errors have their own lines (they shared one before)
     if (st->sleepGap)

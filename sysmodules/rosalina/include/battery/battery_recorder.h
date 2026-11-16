@@ -41,6 +41,8 @@ typedef struct BatteryRecorderStatus
     Result lastWriteRes;
     u16 recoveredNumber; // session closed as "cutoff" at boot, 0 if none
     u32 reassertBase;    // LED re-assert counter (per boot) at the start of the session
+    bool endPending;     // stopped, but the end line isn't on SD yet (write failed, retried)
+    u32 lostLines;       // CSV lines dropped because the SD kept failing ("# lost lines=<n>" in the CSV)
 } BatteryRecorderStatus;
 
 /// Creates the recorder thread (call once from main()).
