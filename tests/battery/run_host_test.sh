@@ -28,7 +28,9 @@
 #     config.ini tests (bars_host_test.c). With the dump also both windows in the real code (in place,
 #     stock, unique) and ptm's own instructions run against the model.
 #   - menu helpers: home screen summary widths / texts, "Next:" hint decision, Diagnostics titles and the
-#     labelled voltage lines, footer voltage scale (menu_host_test.c).
+#     labelled voltage lines, footer voltage scale, Time left row (menu_host_test.c).
+#   - time-remaining estimate: slope, remaining, rounding / clamps, format; linear and noisy drain, too little data,
+#     flat / rising, resets (charging, no curve, gap, explicit) (eta_host_test.c).
 #
 # GRAPH_OUT=<dir>: also renders the on-console graph (battery_graph.c) into
 # <dir>/graph_full.ppm, graph_zoom.ppm and graph_nocurve_full.ppm / _zoom.ppm (needs sessions).
@@ -43,7 +45,7 @@ OUT="${TMPDIR:-/tmp}/battery-host-test.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-case "${1:-}" in -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 if [ $# -eq 0 ] && [ -f "$REPO/sessions/0001.csv" ] && [ -f "$REPO/sessions/0002.csv" ]; then
     set -- "$REPO/sessions/0001.csv" "$REPO/sessions/0002.csv"
     echo "using $REPO/sessions/0001.csv and 0002.csv"
@@ -80,8 +82,13 @@ CC="${CC:-$(command -v clang || command -v cc)}"
 "$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Wno-format \
     -I "$HERE/host_sd" -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
     "$REPO/sysmodules/rosalina/source/battery/battery_menu_logic.c" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_eta_logic.c" \
     "$REPO/sysmodules/rosalina/source/battery/battery_led_logic.c" "$HERE/menu_host_test.c" \
     -o "$OUT/menu_host_test"
+"$CC" -std=gnu11 -O2 -ffp-contract=off -Wall -Wextra -Werror -Wno-format \
+    -I "$HERE/host_sd" -I "$HERE/host_include" -I "$REPO/sysmodules/rosalina/include" \
+    "$REPO/sysmodules/rosalina/source/battery/battery_eta_logic.c" "$HERE/eta_host_test.c" \
+    -lm -o "$OUT/eta_host_test"
 PTM_CODE="${PTM_CODE:-$REPO/sessions/ptm/0004013020002202.dec.code}"
 
 if [ $# -eq 0 ]; then
@@ -98,6 +105,8 @@ if [ $# -eq 0 ]; then
     "$OUT/bars_host_test" "$PTM_CODE" || status=1
     echo
     "$OUT/menu_host_test" || status=1
+    echo
+    "$OUT/eta_host_test" || status=1
     echo
     [ $status -eq 0 ] && echo "PASS (unit tests only, replay skipped)" || echo "FAIL"
     exit $status
@@ -187,6 +196,8 @@ echo
 "$OUT/bars_host_test" "$PTM_CODE" || status=1
 echo
 "$OUT/menu_host_test" || status=1
+echo
+"$OUT/eta_host_test" || status=1
 echo
 
 if [ -n "${GRAPH_OUT:-}" ]; then

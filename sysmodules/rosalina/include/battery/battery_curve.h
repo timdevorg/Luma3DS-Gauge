@@ -150,6 +150,8 @@ void BatteryCurve_Init(void);
 /// (Re)loads curve.bin (or curve.tmp if a power cut hit the rename). Returns true if a valid curve is loaded.
 bool BatteryCurve_Load(void);
 bool BatteryCurve_IsLoaded(void);
+/// Counts BatteryCurve_Load calls (boot, build, restore): the time-remaining estimate starts over when it changes.
+u32 BatteryCurve_Generation(void);
 /// Copies the loaded curve into a static buffer shared with BatteryCurve_Build (saves RAM) and
 /// returns it, or NULL if no curve is loaded. Menu thread only; valid until the next call / build.
 const BatteryCurveFile *BatteryCurve_Snapshot(void);

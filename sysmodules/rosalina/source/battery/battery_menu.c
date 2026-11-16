@@ -1721,6 +1721,8 @@ static void batteryHomeGather(BatteryHomeData *h, bool *haveVoltTemp)
         in->corrected = h->led.corrected;
     else
         in->corrected = in->haveSample ? BatteryCurve_Corrected(h->s.pctInt + h->s.pctFrac / 256.0f, (float)h->s.voltageRaw) : -1.0f;
+    in->etaState = h->led.etaState; // computed by the LED thread (section 17); "calculating" before its first poll
+    in->etaMinutes = h->led.etaMinutes;
     in->ledReason = h->led.reason;
     in->ledDesired = h->led.desired;
     in->ledError = h->led.error;
@@ -1745,8 +1747,8 @@ static u32 batteryToneColor(u8 tone)
 // Rosalina > Battery Manager...: live summary (refreshed every second), a "Next:" hint and the four entries. Up/Down
 // select, A opens, B goes back, like a Rosalina menu. Settings and Setup guide are called directly; Learning... and
 // Advanced... are opened with menuShow, so they behave exactly like before (same items, dynamic recording title, footer).
-// Layout (fixed rows, every one padded, so the 1 s redraw leaves no residue): 7 summary rows, blank, 2 hint rows,
-// blank, 4 entries; 15 of the 17 body lines.
+// Layout (fixed rows, every one padded, so the 1 s redraw leaves no residue): 8 summary rows, blank, 2 hint rows,
+// blank, 4 entries; 16 of the 17 body lines.
 void BatteryMenu_Home(void)
 {
     BatteryHomeData *h = &g_home;

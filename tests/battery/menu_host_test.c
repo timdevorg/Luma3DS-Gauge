@@ -3,9 +3,9 @@
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
 *   Host test for the menu's pure helpers (sysmodules/rosalina/source/battery/battery_menu_logic.c):
-*   1. Home summary: 7 lines, every line at most 49 chars and never cut, over every LED reason / mode / error, bars
+*   1. Home summary: 8 lines, every line at most 49 chars and never cut, over every LED reason / mode / error, bars
 *      level / reason / patch state, Sleep LED setting and a random walk over the numbers (500000 inputs); fixed
-*      columns (value at 14, note at 27); expected texts for the documented states.
+*      columns (value at 14, note at 27); expected texts for the documented states, including every Time left state.
 *   2. "Next:" hint: the decision table (error > recording > no curve (charge / record) > Power LED stock > none) and
 *      the texts (at most 49 chars, none for "all set").
 *   3. Diagnostics page titles and the two labelled voltage lines (all raw 0..255 fit, "=" lined up); the footer
@@ -80,6 +80,8 @@ static BatteryHomeInputs baseInputs(void)
     in.sleepPatch = BATTERY_HOME_PATCH_OK;
     in.haveCurve = true;
     in.curveSessions = 3;
+    in.etaState = BATTERY_ETA_OK;
+    in.etaMinutes = 135;
     return in;
 }
 
@@ -135,6 +137,7 @@ static void testSummaryWidths(void)
                     in.recElapsedMs = 0xFFFFFFFFu;
                     in.recSleepGap = true;
                     in.curveSessions = BATTERY_CURVE_MAX_SESSIONS;
+                    in.etaMinutes = 23 * 60 + 55; // widest "~23h 55m"
                     checkSummary(&in);
                     n++;
                 }
@@ -182,6 +185,8 @@ static void testSummaryWidths(void)
         in.recElapsedMs = (rnd() & 1) ? rnd() : 0xFFFFFFFFu;
         in.recSleepGap = rnd() & 1;
         in.recErrors = rnd() & 1;
+        in.etaState = rnd() % (BATTERY_ETA_OK + 2);
+        in.etaMinutes = (rnd() & 1) ? BATTERY_ETA_MAX_MINUTES : rnd() % (BATTERY_ETA_MAX_MINUTES + 1);
         checkSummary(&in);
         n++;
     }
@@ -196,12 +201,13 @@ static void testSummaryTexts(void)
     BatteryHomeInputs in = baseInputs();
     BatteryHome_Summary(&in, out);
     CHECK(strcmp(out[0].text, " Battery      29.9 %       (stock gauge 3.6 %)") == 0);
-    CHECK(strcmp(out[1].text, " Charger      no") == 0);
-    CHECK(strcmp(out[2].text, " Power LED    blue         corrected") == 0);
-    CHECK(strcmp(out[3].text, " HOME bars    2 of 4       corrected") == 0);
-    CHECK(strcmp(out[4].text, " Sleep LED    dim blue") == 0);
-    CHECK(strcmp(out[5].text, " Curve        3 sessions") == 0);
-    CHECK(strcmp(out[6].text, " Recording    off") == 0);
+    CHECK(strcmp(out[1].text, " Time left    ~2h 15m      (at the current load)") == 0);
+    CHECK(strcmp(out[2].text, " Charger      no") == 0);
+    CHECK(strcmp(out[3].text, " Power LED    blue         corrected") == 0);
+    CHECK(strcmp(out[4].text, " HOME bars    2 of 4       corrected") == 0);
+    CHECK(strcmp(out[5].text, " Sleep LED    dim blue") == 0);
+    CHECK(strcmp(out[6].text, " Curve        3 sessions") == 0);
+    CHECK(strcmp(out[7].text, " Recording    off") == 0);
     for (u32 i = 0; i < BATTERY_HOME_SUMMARY_LINES; i++)
         CHECK(out[i].tone == BATTERY_TONE_NORMAL);
 
@@ -217,10 +223,10 @@ static void testSummaryTexts(void)
     in.barsReason = BATTERY_BARS_REASON_NO_CURVE;
     BatteryHome_Summary(&in, out);
     CHECK(strcmp(out[0].text, " Battery      72.4 %       (stock, not corrected)") == 0);
-    CHECK(strcmp(out[2].text, " Power LED    stock        (console's own)") == 0);
-    CHECK(strcmp(out[3].text, " HOME bars    stock        (needs a curve)") == 0 && out[3].tone == BATTERY_TONE_INACTIVE);
-    CHECK(strcmp(out[4].text, " Sleep LED    dim blue     (needs Power LED)") == 0 && out[4].tone == BATTERY_TONE_INACTIVE);
-    CHECK(strcmp(out[5].text, " Curve        none yet") == 0);
+    CHECK(strcmp(out[3].text, " Power LED    stock        (console's own)") == 0);
+    CHECK(strcmp(out[4].text, " HOME bars    stock        (needs a curve)") == 0 && out[4].tone == BATTERY_TONE_INACTIVE);
+    CHECK(strcmp(out[5].text, " Sleep LED    dim blue     (needs Power LED)") == 0 && out[5].tone == BATTERY_TONE_INACTIVE);
+    CHECK(strcmp(out[6].text, " Curve        none yet") == 0);
 
     // Charging, held bars, recording, error, patch unavailable
     in = baseInputs();
@@ -231,13 +237,13 @@ static void testSummaryTexts(void)
     in.recNumber = 5;
     in.recElapsedMs = (1 * 3600 + 23 * 60 + 5) * 1000u;
     BatteryHome_Summary(&in, out);
-    CHECK(strcmp(out[1].text, " Charger      charging") == 0);
-    CHECK(strcmp(out[2].text, " Power LED    blue         corrected, charging") == 0);
-    CHECK(strcmp(out[3].text, " HOME bars    2 of 4       corrected, held") == 0);
-    CHECK(strcmp(out[6].text, " Recording    #0005        1:23:05") == 0 && out[6].tone == BATTERY_TONE_NORMAL);
+    CHECK(strcmp(out[2].text, " Charger      charging") == 0);
+    CHECK(strcmp(out[3].text, " Power LED    blue         corrected, charging") == 0);
+    CHECK(strcmp(out[4].text, " HOME bars    2 of 4       corrected, held") == 0);
+    CHECK(strcmp(out[7].text, " Recording    #0005        1:23:05") == 0 && out[7].tone == BATTERY_TONE_NORMAL);
     in.recSleepGap = true;
     BatteryHome_Summary(&in, out);
-    CHECK(strcmp(out[6].text, " Recording    #0005        1:23:05 sleep gap") == 0 && out[6].tone == BATTERY_TONE_ERROR);
+    CHECK(strcmp(out[7].text, " Recording    #0005        1:23:05 sleep gap") == 0 && out[7].tone == BATTERY_TONE_ERROR);
 
     in = baseInputs();
     in.ledReason = BATTERY_LED_REASON_ERROR;
@@ -245,9 +251,9 @@ static void testSummaryTexts(void)
     in.haveSample = false;
     BatteryHome_Summary(&in, out);
     CHECK(strcmp(out[0].text, " Battery      ?            (gauge read failed)") == 0 && out[0].tone == BATTERY_TONE_ERROR);
-    CHECK(strcmp(out[2].text, " Power LED    error        (see Diagnostics)") == 0 && out[2].tone == BATTERY_TONE_ERROR);
-    CHECK(strcmp(out[3].text, " HOME bars    stock        (see Diagnostics)") == 0 && out[3].tone == BATTERY_TONE_INACTIVE);
-    CHECK(strcmp(out[4].text, " Sleep LED    dim blue     (see Diagnostics)") == 0);
+    CHECK(strcmp(out[3].text, " Power LED    error        (see Diagnostics)") == 0 && out[3].tone == BATTERY_TONE_ERROR);
+    CHECK(strcmp(out[4].text, " HOME bars    stock        (see Diagnostics)") == 0 && out[4].tone == BATTERY_TONE_INACTIVE);
+    CHECK(strcmp(out[5].text, " Sleep LED    dim blue     (see Diagnostics)") == 0);
 
     // Bar levels 1..5
     static const char *const levels[] = { "1 (blinking)", "1 (red)", "2 of 4", "3 of 4", "4 of 4" };
@@ -258,16 +264,37 @@ static void testSummaryTexts(void)
         in.barsLevel = l;
         BatteryHome_Summary(&in, out);
         snprintf(want, sizeof(want), " HOME bars    %-12s corrected", levels[l - 1]);
-        CHECK(strcmp(out[3].text, want) == 0);
+        CHECK(strcmp(out[4].text, want) == 0);
     }
     in = baseInputs();
     in.ledDesired = BATTERY_LED_MODE_BLINK;
     in.cfg.sleepMode = BATTERY_LED_MODE_BLUE;
     in.curveSessions = 1;
     BatteryHome_Summary(&in, out);
-    CHECK(strcmp(out[2].text, " Power LED    blinking red corrected") == 0);
-    CHECK(strcmp(out[4].text, " Sleep LED    bright blue") == 0);
-    CHECK(strcmp(out[5].text, " Curve        1 session") == 0);
+    CHECK(strcmp(out[3].text, " Power LED    blinking red corrected") == 0);
+    CHECK(strcmp(out[5].text, " Sleep LED    bright blue") == 0);
+    CHECK(strcmp(out[6].text, " Curve        1 session") == 0);
+
+    // Time left: every state (section 17)
+    static const struct { u8 state; u16 minutes; const char *text; u8 tone; } eta[] = {
+        { BATTERY_ETA_NO_DATA,      0,    " Time left    calculating  (10 min on battery)", BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_CALCULATING,  0,    " Time left    calculating  (10 min on battery)", BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_CHARGING,     0,    " Time left    charging",                         BATTERY_TONE_NORMAL },
+        { BATTERY_ETA_NO_CURVE,     0,    " Time left    --           (needs a curve)",     BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_UNKNOWN,      0,    " Time left    --           (no steady drain)",   BATTERY_TONE_INACTIVE },
+        { BATTERY_ETA_OK,           0,    " Time left    <5m          (at the current load)", BATTERY_TONE_NORMAL },
+        { BATTERY_ETA_OK,           45,   " Time left    ~45m         (at the current load)", BATTERY_TONE_NORMAL },
+        { BATTERY_ETA_OK,           65,   " Time left    ~1h 05m      (at the current load)", BATTERY_TONE_NORMAL },
+        { BATTERY_ETA_OK,           1440, " Time left    ~24h 00m     (at the current load)", BATTERY_TONE_NORMAL },
+    };
+    for (u32 i = 0; i < sizeof(eta) / sizeof(eta[0]); i++)
+    {
+        in = baseInputs();
+        in.etaState = eta[i].state;
+        in.etaMinutes = eta[i].minutes;
+        BatteryHome_Summary(&in, out);
+        CHECK(strcmp(out[1].text, eta[i].text) == 0 && out[1].tone == eta[i].tone);
+    }
     printf("home summary: expected texts OK\n");
 }
 

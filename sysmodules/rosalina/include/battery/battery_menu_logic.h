@@ -4,13 +4,14 @@
 *
 *   Battery Manager: pure helpers of the menu (home screen summary, "Next:" hint, Diagnostics page titles and voltage
 *   lines, footer voltage / temperature). No services; compiled unchanged into the host test
-*   (tests/battery/menu_host_test.c). Design: docs/battery-manager.md, 16.11 - 16.13.
+*   (tests/battery/menu_host_test.c). Design: docs/battery-manager.md, 16.11 - 16.13, 17 (Time left row).
 */
 
 #pragma once
 
 #include <3ds/types.h>
 #include "battery/battery_led_logic.h"
+#include "battery/battery_eta_logic.h"
 
 #define BATTERY_MENU_LINE_CHARS     49 // (320 - 2 * 10) / 6 - 1: body width at x = 10
 #define BATTERY_MENU_BODY_LINES     17 // y = 30 .. 206; the hint row is at SCREEN_BOT_HEIGHT - 20
@@ -38,6 +39,8 @@ typedef struct BatteryHomeInputs
     bool adapter;
     bool charging;
     float corrected;        // corrected %, < 0 without curve / data
+    u8 etaState;            // BatteryEtaState (time remaining, section 17)
+    u16 etaMinutes;         // valid in BATTERY_ETA_OK
     BatteryLedConfig cfg;
     u8 ledReason;           // BatteryLedReason
     u8 ledDesired;          // BATTERY_LED_MODE_*
@@ -55,7 +58,7 @@ typedef struct BatteryHomeInputs
     bool recErrors;         // SD read / write errors in the current session
 } BatteryHomeInputs;
 
-#define BATTERY_HOME_SUMMARY_LINES  7 // Battery, Charger, Power LED, HOME bars, Sleep LED, Curve, Recording
+#define BATTERY_HOME_SUMMARY_LINES  8 // Battery, Time left, Charger, Power LED, HOME bars, Sleep LED, Curve, Recording
 #define BATTERY_HOME_LABEL_CHARS    13
 #define BATTERY_HOME_VALUE_CHARS    12
 

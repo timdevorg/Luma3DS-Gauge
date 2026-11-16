@@ -57,6 +57,8 @@ typedef struct BatteryLedStatus
     bool wakePending;       //   still asleep / lid closed: no wake read yet
     u8 barsLevel;           // ptm battery bars (section 15): decided level 1..5, 0 = stock
     u8 barsReason;          //   BatteryBarsReason
+    u8 etaState;            // time remaining (section 17): BatteryEtaState
+    u16 etaMinutes;         //   rounded minutes, valid in BATTERY_ETA_OK
 } BatteryLedStatus;
 
 /// Creates the LED thread (call once from the recorder's creation, before the service manager runs).

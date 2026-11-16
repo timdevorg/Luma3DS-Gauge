@@ -47,6 +47,7 @@
 #include "battery/battery_led.h"
 #include "battery/battery_ptm_patch.h"
 #include "battery/battery_ptm_bars.h"
+#include "battery/battery_eta_logic.h"
 
 #define BATTERY_LED_THREAD_PRIORITY     56      // above the recorder / task runner (58), below the menu (52)
 #define BATTERY_LED_THREAD_STACK_SIZE   0x800   // shallow call tree, no string formatting
@@ -113,6 +114,11 @@ static struct
     bool barsForce;         // apply at the next poll even if the level didn't change (boot, settings change)
     u64 barsLastApplyMs;
     u8 readFailStreak;      // MCU reads failed in a row
+
+    // Time remaining (section 17, read-only): fed by every successful poll
+    BatteryEta eta;
+    u32 etaCurveGen;        // BatteryCurve_Generation at the last poll: a reload starts the estimate over
+    bool etaResetPending;   // woke from sleep: start over at the next poll
 
     u8 desired, reason;
     u64 lastAttemptMs;
@@ -405,6 +411,23 @@ static u32 batteryLedIntervalLocked(u64 nowMs)
     return g_led.fastPolling ? BATTERY_LED_POLL_FAST_MS : BATTERY_LED_POLL_MS;
 }
 
+// Time remaining (g_led.lock held, after the LED decision of a fresh poll): starts over after a wake, a curve reload
+// and (inside BatteryEta_Update) on the charger, without a curve and after a gap between polls. Charging = the LED
+// logic's debounced state (new samples only after the debounced unplug) or the raw flags (the LED test screen
+// doesn't run the decision). Only computes: nothing is read or written here.
+static void batteryLedEtaLocked(u64 nowMs, u8 flags)
+{
+    u32 gen = BatteryCurve_Generation();
+    if (g_led.etaResetPending || gen != g_led.etaCurveGen)
+    {
+        g_led.etaResetPending = false;
+        g_led.etaCurveGen = gen;
+        BatteryEta_Reset(&g_led.eta);
+    }
+    bool charging = g_led.logic.onCharger || (flags & (BATTERY_MCU_FLAG_ADAPTER | BATTERY_MCU_FLAG_CHARGING)) != 0;
+    BatteryEta_Update(&g_led.eta, (u32)nowMs, g_led.corrected >= 0.0f, charging, g_led.corrected);
+}
+
 static void batteryLedPoll(void)
 {
     BatteryMcuSample s;
@@ -446,6 +469,8 @@ static void batteryLedPoll(void)
         g_led.readFailStreak++;
     batteryLedControlLocked(nowMs, fresh);
     batteryLedBarsLocked(nowMs); // after the LED decision: uses its level / charger state of this poll
+    if (fresh)
+        batteryLedEtaLocked(nowMs, s.flags);
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -576,6 +601,8 @@ void BatteryLed_GetStatus(BatteryLedStatus *out)
     out->wakePending = g_led.wakePending;
     out->barsLevel = g_led.barsLevel;
     out->barsReason = g_led.barsReason;
+    out->etaState = g_led.eta.state;
+    out->etaMinutes = g_led.eta.minutes;
     LightLock_Unlock(&g_led.lock);
 }
 
@@ -639,6 +666,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
             ptmPatch = true;
             break;
         case NOTIF_SHELL_OPENED: // also fired at boot
+            g_led.etaResetPending |= wasSleeping;
             g_led.shellClosed = false;
             g_led.sleepPending = false;
             g_led.sleepOpenPolls = 0;
@@ -646,6 +674,7 @@ void BatteryLed_HandleNotification(u32 notificationId)
             break;
         case PTMNOTIFID_SLEEP_DENIED:
         case PTMNOTIFID_FULLY_AWAKE:
+            g_led.etaResetPending |= wasSleeping && notificationId == PTMNOTIFID_FULLY_AWAKE;
             g_led.sleepPending = false;
             kick = true;
             break;
@@ -755,6 +784,7 @@ MyThread *BatteryLed_CreateThread(void)
     g_led.wakeRead = BATTERY_LED_MODE_UNKNOWN;
     g_led.barsLevel = BATTERY_BARS_STOCK;
     g_led.barsReason = BATTERY_BARS_REASON_NO_DATA;
+    BatteryEta_Reset(&g_led.eta); // BATTERY_ETA_NO_DATA until the first poll
 
     if (R_FAILED(svcCreateEvent(&g_ledKick, RESET_ONESHOT)))
         svcBreak(USERBREAK_PANIC);

@@ -21,6 +21,7 @@
 static LightLock g_curveLock;
 static BatteryCurveFile g_curve; // protected by g_curveLock
 static bool g_curveLoaded;
+static u32 g_curveGeneration; // BatteryCurve_Load calls (BatteryCurve_Generation)
 
 void BatteryCurve_Init(void)
 {
@@ -40,9 +41,18 @@ bool BatteryCurve_Load(void)
 {
     LightLock_Lock(&g_curveLock);
     g_curveLoaded = batteryCurveLoadFileLocked(BATTERY_CURVE_PATH) || batteryCurveLoadFileLocked(BATTERY_CURVE_TMP_PATH);
+    g_curveGeneration++;
     bool loaded = g_curveLoaded;
     LightLock_Unlock(&g_curveLock);
     return loaded;
+}
+
+u32 BatteryCurve_Generation(void)
+{
+    LightLock_Lock(&g_curveLock);
+    u32 gen = g_curveGeneration;
+    LightLock_Unlock(&g_curveLock);
+    return gen;
 }
 
 bool BatteryCurve_IsLoaded(void)

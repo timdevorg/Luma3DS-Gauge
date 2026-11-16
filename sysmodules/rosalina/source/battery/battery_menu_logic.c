@@ -145,6 +145,31 @@ static void homeSleepLed(BatteryHomeLine *line, const BatteryHomeInputs *in)
         homeLine(line, BATTERY_TONE_NORMAL, "Sleep LED", value, "");
 }
 
+// Time left (section 17): the LED thread's estimate. Value column at most 12 chars ("calculating", "~23h 55m").
+static void homeTimeLeft(BatteryHomeLine *line, const BatteryHomeInputs *in)
+{
+    char value[16];
+    switch (in->etaState)
+    {
+        case BATTERY_ETA_OK:
+            BatteryEta_Format(value, in->etaMinutes);
+            homeLine(line, BATTERY_TONE_NORMAL, "Time left", value, "(at the current load)");
+            break;
+        case BATTERY_ETA_CHARGING:
+            homeLine(line, BATTERY_TONE_NORMAL, "Time left", "charging", "");
+            break;
+        case BATTERY_ETA_NO_CURVE:
+            homeLine(line, BATTERY_TONE_INACTIVE, "Time left", "--", "(needs a curve)");
+            break;
+        case BATTERY_ETA_UNKNOWN:
+            homeLine(line, BATTERY_TONE_INACTIVE, "Time left", "--", "(no steady drain)");
+            break;
+        default: // no poll yet, or less than 10 minutes of samples
+            homeLine(line, BATTERY_TONE_INACTIVE, "Time left", "calculating", "(10 min on battery)");
+            break;
+    }
+}
+
 void BatteryHome_Summary(const BatteryHomeInputs *in, BatteryHomeLine out[BATTERY_HOME_SUMMARY_LINES])
 {
     char value[32], note[32];
@@ -167,26 +192,28 @@ void BatteryHome_Summary(const BatteryHomeInputs *in, BatteryHomeLine out[BATTER
         homeLine(&out[0], BATTERY_TONE_NORMAL, "Battery", value, "(stock, not corrected)");
     }
 
-    if (!in->haveSample)
-        homeLine(&out[1], BATTERY_TONE_NORMAL, "Charger", "?", "");
-    else if (in->adapter && in->charging)
-        homeLine(&out[1], BATTERY_TONE_NORMAL, "Charger", "charging", "");
-    else if (in->adapter)
-        homeLine(&out[1], BATTERY_TONE_NORMAL, "Charger", "plugged in", "(not charging)");
-    else
-        homeLine(&out[1], BATTERY_TONE_NORMAL, "Charger", "no", "");
+    homeTimeLeft(&out[1], in);
 
-    homePowerLed(&out[2], in);
-    homeBars(&out[3], in);
-    homeSleepLed(&out[4], in);
+    if (!in->haveSample)
+        homeLine(&out[2], BATTERY_TONE_NORMAL, "Charger", "?", "");
+    else if (in->adapter && in->charging)
+        homeLine(&out[2], BATTERY_TONE_NORMAL, "Charger", "charging", "");
+    else if (in->adapter)
+        homeLine(&out[2], BATTERY_TONE_NORMAL, "Charger", "plugged in", "(not charging)");
+    else
+        homeLine(&out[2], BATTERY_TONE_NORMAL, "Charger", "no", "");
+
+    homePowerLed(&out[3], in);
+    homeBars(&out[4], in);
+    homeSleepLed(&out[5], in);
 
     if (in->haveCurve)
     {
         sprintf(value, "%lu session%s", in->curveSessions, in->curveSessions == 1 ? "" : "s");
-        homeLine(&out[5], BATTERY_TONE_NORMAL, "Curve", value, "");
+        homeLine(&out[6], BATTERY_TONE_NORMAL, "Curve", value, "");
     }
     else
-        homeLine(&out[5], BATTERY_TONE_NORMAL, "Curve", "none yet", "");
+        homeLine(&out[6], BATTERY_TONE_NORMAL, "Curve", "none yet", "");
 
     if (in->recording)
     {
@@ -194,10 +221,10 @@ void BatteryHome_Summary(const BatteryHomeInputs *in, BatteryHomeLine out[BATTER
         BatteryMenu_FormatDuration(dur, in->recElapsedMs);
         sprintf(value, "#%04lu", (u32)in->recNumber);
         sprintf(note, "%s%s", dur, in->recSleepGap ? " sleep gap" : in->recErrors ? " SD errors" : "");
-        homeLine(&out[6], in->recSleepGap || in->recErrors ? BATTERY_TONE_ERROR : BATTERY_TONE_NORMAL, "Recording", value, note);
+        homeLine(&out[7], in->recSleepGap || in->recErrors ? BATTERY_TONE_ERROR : BATTERY_TONE_NORMAL, "Recording", value, note);
     }
     else
-        homeLine(&out[6], BATTERY_TONE_NORMAL, "Recording", "off", "");
+        homeLine(&out[7], BATTERY_TONE_NORMAL, "Recording", "off", "");
 }
 
 u8 BatteryHome_NextStep(const BatteryHomeInputs *in)
