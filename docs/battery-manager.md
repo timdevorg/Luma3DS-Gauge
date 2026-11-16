@@ -18,6 +18,8 @@ red only appear when the battery is actually low.
 > [Section 15](#15-ptm-battery-bars-patch-milestone-5) adds a second, independent ptm patch (four verified bytes) so
 > that HOME Menu's battery bars follow the corrected % too (default on, level held while charging); **tested on
 > hardware** (15.11).
+> [Section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak) reorganises the menu (one Settings
+> screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **not yet tested on hardware**.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -154,22 +156,34 @@ the LED back.
   - `/luma/battery/config.ini`: LED settings ([section 12.6](#126-settings-lumabatteryconfigini))
   - `/luma/battery/sessions/NNNN.csv`: one file per recorded discharge
   - `/luma/battery/curve.bin`: built curve (161-point MCU table + 81-point voltage table, [section 11](#11-curve-builder--graph-milestone-3))
+  - `/luma/battery/curve.bak`: the previous curve (same format), kept by Build curve and Restore previous curve ([16.4](#164-curvebak-and-restore-previous-curve))
   - `/luma/battery/curve_select.ini`: which sessions the curve builder uses
 
 ### 4.2 Menu
 
+Current tree (since [section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak)):
+
 ```
-Battery Manager
-├─ Status            MCU %, corrected %, voltage, temp, charging, LED state, recorder state
-├─ Start recording
-├─ Stop recording
-├─ Sessions          list (complete / incomplete / invalid), delete
-├─ Build curve       select sessions (checkbox), build → curve.bin
-├─ Show graph        corrected curve vs stock (diagonal) + min/max band
-├─ LED override      on / off (default off)
-├─ Thresholds        solid red at X % (default 10), blinking red at Y % (default 3), blue mode 5 / 1
-└─ LED test          write each LED mode by hand, with read-back
+Battery Manager...
+├─ Settings                  one editor: Power LED, Sleep LED, HOME Menu bars, Red LED at, Blinking red at,
+│                            4 bars from, 3 bars from (Left/Right change, SELECT undo, B save and back)
+├─ Learning...
+│  ├─ Start recording        or "Stop recording  #0005  1:23:05" while recording (one entry)
+│  ├─ Sessions               usable / partial / sleep gap / recording, * = in the current curve; A details, Y delete
+│  ├─ Build curve            select sessions (checkbox), X → confirmation → curve.bin (old one kept as curve.bak)
+│  └─ Curve graph            corrected curve vs stock (diagonal) + min/max band
+├─ Setup guide               five steps, ticked from the current state
+└─ Advanced...
+   ├─ Diagnostics            the former Status screen: raw gauge, LED, ptm patch and recorder values
+   ├─ LED test               write each LED mode by hand, with read-back
+   ├─ Blue LED type          blue_mode 5 (red off, blue on, default) / 1 (forced blue), same editor as Settings
+   ├─ Restore previous curve curve.bak ↔ curve.bin
+   └─ Limits and about       boot ~5 s, sleep, ptm version, ~8 s bars delay, files
 ```
+
+Older sections (9–15) use the former names: **Status** = Advanced > Diagnostics, **LED override** = Settings >
+Power LED (`corrected` = on), **Sleep LED** / **Battery bars** entries = Settings rows, **Thresholds** = the
+percentage rows of Settings (blue mode: Advanced > Blue LED type), **Show graph** = Curve graph.
 
 ### 4.3 Recording
 
@@ -381,13 +395,16 @@ Recording **never** resumes automatically after boot.
 | `complete` | first sample ≥ 95.0 % **and** ended by power-off (`shutdown`, `cutoff`, or no end line at all) **and** no sleep gap |
 | `incomplete` | everything else (e.g. `stop`, `charger`, started below 95 %) |
 
-The session being recorded is shown as `recording` and can't be deleted.
+The session being recorded is shown as `recording` and can't be deleted. On screen the classes are called
+**usable** (`complete`), **partial** (`incomplete`) and **sleep gap** (`invalid`) since section 16; the CSV, the
+code and this document keep the internal names.
 Note: a manual power-off also ends with `shutdown`, so a session you power off
 yourself at 60 % looks "complete". Check the end % in the list (it shows
 start % → end %). The curve builder flags complete sessions ending above 5 % as
 "high end %" and leaves them unselected by default.
 
-Sessions list keys: Up/Down select, A details, X or Y delete (asks for confirmation), B back.
+Sessions list keys: Up/Down select, A details, Y delete (asks for confirmation; X no longer deletes since section
+16, it builds on the Build curve screen), B back.
 It shows the 64 highest-numbered sessions, newest first. Opening it reads every CSV
 (a few seconds for many long sessions).
 
@@ -463,7 +480,7 @@ Conclusions:
 | `sysmodules/rosalina/source/battery/battery_curve.c` | Pure math: CSV line parsing, per-session tables, combining, file checksum, lookup. No 3DS services, so it also compiles on the host. |
 | `sysmodules/rosalina/source/battery/battery_curve_sd.c` | Builds from session CSVs on SD (streamed line by line), safe write of `curve.bin`, loaded curve + lock, `curve_select.ini` |
 | `sysmodules/rosalina/source/battery/battery_graph.c` | Graph on the bottom screen, with minimal pixel / line helpers (Rosalina's `Draw_*` API only draws text) |
-| `sysmodules/rosalina/source/battery/battery_menu.c` | "Build curve" and "Show graph" entries, "Corrected" line in Status |
+| `sysmodules/rosalina/source/battery/battery_menu.c` | "Build curve" and "Show graph" (now "Curve graph") entries, "Corrected" line in Status |
 | `scripts/build_curve.py` | Host reference implementation (Python 3, stdlib only) |
 | `tests/battery/` | Host test: compiles `battery_curve.c` natively and compares it with `build_curve.py` |
 
@@ -558,21 +575,24 @@ Status shows `Corrected: xx.x%` (instantaneous `volt_raw`) once a curve is loade
 
 The loader checks magic, version, point counts, ascending grids and the CRC.
 
-**Safe write**: the curve goes to `curve.tmp` (flushed), then `curve.bin` is deleted and
+**Safe write**: the curve goes to `curve.tmp` (flushed), then the old `curve.bin` is renamed to
+`curve.bak` (an older `curve.bak` is deleted first; since section 16, before that `curve.bin` was deleted) and
 `curve.tmp` renamed to `curve.bin`. After a power cut at any point there is either a valid
 `curve.bin`, or a valid `curve.tmp` that the loader uses instead (or the old curve.bin plus an
-invalid curve.tmp, which is ignored).
+invalid curve.tmp, which is ignored). The loader never reads `curve.bak`; only Restore previous curve does (16.4).
 
 ### 11.5 Menu
 
-- **Build curve**: checkbox list of complete sessions, newest first:
-  `>[x] 0001   7:28 end   1.0% in curve`. Flags: `high end %` (red), `outlier` / `in curve`
-  (from the loaded curve). Up/Down select, **A** toggles, **X** or **START** builds, **B** back
-  (the selection is saved). Building shows "Building... Pass n/2: session #NNNN (i of n)", then a
-  summary: sessions used, max spread, outliers with each session's deviation, and the real % at
-  MCU 50 / 25 / 10 / 5 / 2 / 1 %. At most 16 sessions per curve.
-- **Show graph**: bottom screen. X = MCU %, Y = real %. Grey diagonal = stock, bright green =
-  learned mean, dark green band = min..max. **Y** toggles the zoom (MCU 0–10 %, real 0–50 %),
+- **Build curve** (Learning): checkbox list of usable (complete) sessions, newest first:
+  `>[x] 0001   7:28 ends   1.0 % in curve` (`ends` = stock gauge % at the end). Flags: `high end %` (red),
+  `outlier` / `in curve` (from the loaded curve). Up/Down select, **A** toggles, **X** (or **START**) asks for
+  confirmation ("replaces the current one ... kept as curve.bak") and builds, **B** back (the selection is saved).
+  Building shows "Building... Pass n/2: session #NNNN (i of n)", then a summary: sessions used, max spread,
+  outliers with each session's deviation, and `Stock 50/25/10 % = real ...` / `Stock 5/2/1 % = real ...`. At
+  most 16 sessions per curve. After the first curve (none before) with the Power LED stock it offers to switch
+  it to corrected (16.5).
+- **Curve graph** (Learning, formerly Show graph): bottom screen. X = MCU % (labelled "stock"), Y = real %. Grey
+  diagonal = stock, bright green = learned mean, dark green band = min..max. **Y** toggles the zoom (MCU 0–10 %, real 0–50 %),
   **B** back. Without a curve it shows the axes, the diagonal and a hint.
 
 ### 11.6 Host tools
@@ -792,24 +812,34 @@ bars_3=40
 | `sleep_mode` | 1 | 1 (dim), 5 (bright) or 0 (off); legacy `2`, `system`, `anim` = 0 (12.11); anything else (3, 4, 6, 7, 255, `-1`, text) = 1 |
 
 Missing file or keys = defaults (so the override is **off** after the first install). Written by the
-menu only, safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
+menu only (the Settings and Blue LED type screens when they are left with a change, and the "turn on the Power
+LED?" question after the first curve), safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
 `config.tmp`). Loaded by the LED thread as soon as the SD card can be opened (13.4), or earlier when a
 menu entry needs it.
 
 ### 12.7 Menu
 
-- **LED override: ON/OFF** (title shows the state): toggles and saves, shows what it means.
-- **Sleep LED: dim blue / bright blue / off (stock)** (title shows the setting): each selection moves to
-  the next value (dim → bright → off → dim), saves `config.ini` and shows what it means (12.11).
-- **Thresholds**: Up/Down select, Left/Right change: solid red X %, blinking Y % (Y < X enforced), blue
-  mode 5 / 1. B saves (only if changed).
-- **LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
+Since section 16 (tree in 4.2):
+
+- **Settings**: one screen for all user settings. Up/Down select a row, Left/Right change it, the lines below
+  explain the selected row with the current values; **SELECT** undoes every change made on the screen, **B**
+  saves (one `BatteryLed_SetConfig`, only if something changed; "Saved." for 0.7 s) and goes back. Rows:
+  `Power LED: corrected / stock` (`led_override`), `Sleep LED: dim blue / bright blue / stock` (`sleep_mode`, shown
+  in teal with `(inactive)` while the Power LED is stock), `HOME Menu bars: corrected / stock` (`bars`), `Red LED
+  at`, `Blinking red at`, `4 bars from`, `3 bars from` (`red_pct`, `blink_pct`, `bars_4`, `bars_3`; Left/Right keep
+  blink < red < 3 bars < 4 bars ≤ 100 and red ≤ 50, `BatteryLedConfig_Step`). Without a curve a red line says the
+  Power LED and the bars stay stock. Nothing changes until the screen is left (the old entries toggled as soon as
+  they were opened).
+- **Advanced > Blue LED type**: the same editor with one row, `blue_mode` 5 (`red off, blue on`) / 1 (`forced
+  blue`).
+- **Advanced > LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
   read-back and the red / blue state (refreshed 4× per second). Normal control pauses while the
   screen is open and is restored on exit.
-- **Status**: corrected % (the LED's input, with the median voltage), override state + reason
-  (`active`, `override off`, `no curve`, `charger`, `lid closed`, …, `fast poll`), desired and read-back
-  mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last one), the
-  `Sleep:` diagnostics line (12.11), the `ptm patch:` line (14.5), errors.
+- **Advanced > Diagnostics** (formerly Status): corrected % (the LED's input, with the median voltage), `LED
+  control: ON (reason)` (`active`, `no curve`, `charger`, `lid closed`, …, `fast poll`; just `OFF` when off),
+  desired and read-back mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last
+  one), the `Sleep:` diagnostics line (12.11), the `ptm patch:` line (14.5), the `bars patch:` line (15.6),
+  errors. The temperature follows Rosalina's °C / °F setting.
 
 ### 12.8 Host tests
 
@@ -875,14 +905,15 @@ Superseded by [13.8](#138-on-device-checklist); results of this first run in 13.
 What the sleep hook writes when the lid closes (`0x214`) or sleep is requested (`0x101`) while the
 override is on and the level is **blue**, or while **charging** with dim / bright (any level):
 
-| `sleep_mode` | Menu | Written at sleep (blue level / charging) | While asleep (on device) |
+| `sleep_mode` | Settings row | Written at sleep (blue level / charging) | While asleep (on device) |
 |---|---|---|---|
 | `1` (default) | `Sleep LED: dim blue` | 1 (ptm sleep byte `01`) | dim blue: mode 1 follows ptm's sleep brightness 50 |
 | `5` | `Sleep LED: bright blue` | 5 (ptm sleep byte `05`) | full-brightness blue (mode 5 ignores `0x28`) |
-| `0` | `Sleep LED: off (stock)` | nothing; ptm stays stock (`02` / `00`) | stock behaviour (MCU sleep animation, red when the MCU thinks the battery is low) |
+| `0` | `Sleep LED: stock` | nothing; ptm stays stock (`02` / `00`) | stock behaviour (MCU sleep animation, red when the MCU thinks the battery is low) |
 
 - Legacy values: `2` (the former `anim(2)` option), `system` and `anim` parse to `0` (off): with the ptm
-  patch they all gave the same stock behaviour. The menu saves `1` / `5` / `0`. `0` here never means
+  patch they all gave the same stock behaviour. The menu saves `1` / `5` / `0`. With the Power LED (override) stock
+  the setting does nothing; Settings shows it as `(inactive)`. `0` here never means
   "write automatic".
 - Missing key, a missing file, or an invalid value: 1 (dim). Earlier default was 5.
 - At the **first** sleep signal of a sleep the configured mode is written even if the LED should already
@@ -1613,14 +1644,14 @@ Old `config.ini` files without the keys: defaults (bars **on**). The write buffe
 
 Menu:
 
-- New entry **Battery bars: corrected / stock** (after Sleep LED; the title shows the setting): toggles, saves,
-  explains the mapping with the current thresholds. Independent of the LED override, but needs a curve (shown in
-  red if there is none).
-- **Thresholds** got two rows: `4 bars from: 70 % corrected`, `3 bars from: 40 % corrected`. Left / Right keep
+- Settings row **HOME Menu bars: corrected / stock** (since section 16; first a separate "Battery bars" entry).
+  Independent of the Power LED (override), but needs a curve (Settings says so in red if there is none).
+- Settings rows `4 bars from` / `3 bars from` (first part of Thresholds). Left / Right keep
   blink < red < 3 bars < 4 bars ≤ 100 (raising red stops below 3 bars).
-- **Rosalina menu footer** (`menu.c`, the temperature / voltage / % at the bottom right): with a curve it now also
-  shows the corrected %, e.g. `25°C 3.85V 72.4% c69.9%` (single spaces; right-aligned in a fixed 26-character field
-  so a shorter string clears the old one). Without a curve the upstream string is unchanged.
+- **Rosalina menu footer** (`menu.c`, the temperature / voltage / % at the bottom right): with a curve it also
+  shows the corrected %, e.g. `25°C 3.85V 72.4%→69.9%` (the arrow is CP437 `0x1A`, one character; first
+  `72.4% c69.9%`; at most 25 characters, right-aligned in a fixed 26-character field so a shorter string clears the
+  old one). Without a curve the upstream string is unchanged.
 
 ### 15.6 Status line
 
@@ -1629,8 +1660,8 @@ to make room):
 
 ```
 bars patch: fed L=3 (shared 3), writes 4
-bars patch: fed L=3 (charging, held, shared 3), writes 4
-bars patch: stock (off), shared 5, writes 6             (also: no curve, no data, MCU err)
+bars patch: fed L=3 (held), shared 3, writes 4          (charging: level held)
+bars patch: stock (off), shared 5, w 6                  (also: no curve, no data, MCU err)
 bars patch: not checked yet, shared 5
 bars patch: off: mismatch (A)                           (also: (B), (A+B))
 bars patch: off: title id 00040130xxxx2202
@@ -1641,7 +1672,9 @@ bars patch: write error (want L=3), writes N
 `L` is the `movs` byte now in both copies; `shared` is `(*(vu8 *)0x1FF81085 >> 2) & 7`, read (only read) through
 libctru's `OS_SharedConfig->led_battery` in Rosalina's own mapping of the shared page. It is what HOME Menu sees and
 only changes at ptm's next tick (or wake), so `fed L=3 (shared 4)` for a while after a change is expected; it is the
-way to measure the tick latency on the device. `writes` counts byte writes this boot (enable = 4, change = 2).
+way to measure the tick latency on the device. `writes` / `w` counts byte writes this boot (enable = 4, change = 2).
+Every variant fits the 49-character line with up to 4-digit counts (the charging and stock lines were shortened in
+section 16; before, the write count was cut off).
 
 ### 15.7 Safety argument
 
@@ -1757,3 +1790,155 @@ corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off
   red bars (raised `red_pct`) made it appear.
 - With "charging = stock", unplugging at MCU 3.6 % showed 1 blinking red bar and the low-battery notification
   until the debounce and the next tick passed; hence "charging = held" (15.3).
+
+## 16. Menu clean-up (Settings screen, Learning / Advanced, curve.bak)
+
+A UX review of the menu found settings that changed as soon as their entry was opened, outdated texts ("stock while
+charging", "only gets better while charging"), raw terms on user screens ("override", "mode 5", "MCU"), clipped
+Status lines, a Build curve that overwrote the curve without asking, and an undocumented X that deleted sessions.
+This section is UI only: the LED, sleep, ptm and bars logic, the `config.ini` keys and defaults (LED override still
+**off** by default), the CSV format and `curve.bin` v1 are unchanged. **Not yet tested on hardware.**
+
+### 16.1 Tree
+
+See 4.2. The main menu has four entries (Settings, Learning..., Setup guide, Advanced...). No item title depends
+on `config.ini` any more (`BatteryMenu_Update*Title` are gone; they showed the defaults until the config loaded
+about 5 s after boot). The only dynamic title is Learning's first entry, `Start recording` or `Stop recording
+#0005  1:23:05`: a static buffer padded to 34 characters, refreshed by the item's visibility callback, which
+`menuDraw` calls on every redraw (about once a second).
+
+### 16.2 Settings
+
+One editor (12.7) replaces the entries LED override, Sleep LED, Battery bars and Thresholds. Mockup with the
+defaults:
+
+```
+Battery Manager - Settings
+
+> Power LED          stock
+  Sleep LED          dim blue (inactive)
+  HOME Menu bars     corrected
+  Red LED at          10 %
+  Blinking red at      3 %
+  4 bars from         70 %
+  3 bars from         40 %
+
+corrected: the power LED follows the corrected
+battery %: blue above 10 %, solid red at 10 %
+and below, blinking red at 3 % and below.
+Always blue while charging.
+stock: the console's own LED (it turns red far
+too early with this battery).
+
+No curve yet: Power LED and bars stay stock.
+Not saved yet.
+Left/Right: change  SELECT: undo  B: save, back
+```
+
+- Left / Right go through `BatteryLedConfig_Step` (pure, `battery_led_logic.c`): choices wrap around (Sleep LED
+  dim → bright → stock → dim), percentages move by 1 and stop at the old Thresholds limits, so a sanitized config
+  stays sanitized.
+- Leaving with a change calls `BatteryLed_SetConfig` once (same `config.ini` writes and LED re-evaluation as the
+  old Thresholds screen), then shows `Saved.` in the hint row for 0.7 s; a save error shows the existing "Could not
+  save config.ini" screen. SELECT is the way to leave without saving: undo, then B (nothing changed, nothing
+  written).
+- `blue_mode` moved to Advanced > Blue LED type (the same editor with one row).
+
+### 16.3 Learning
+
+- **Start recording** checks the stock gauge first (`BatterySessions_StartCheck`, next to the classification
+  rule): below 95 % it explains that the session can only become partial and asks (`A: start anyway  B: cancel`);
+  on the charger it explains that a recording has to run on the battery (the recorder itself refuses to start on
+  the adapter, `BATTERY_REC_CHARGER_PLUGGED`, so there is no "start anyway" there). The started screen says what
+  spoils a session (sleep, charger) and how to end early. **Stop recording** asks first (a stopped session is
+  never usable).
+- **Sessions**: `#  Result  Length  Battery (stock)` header, 13 rows, `*` for sessions in the loaded curve (legend
+  under the list), class names usable / partial / sleep gap / recording, details with the end reason in words and
+  the start / end % labelled "stock gauge". **Y** deletes after a confirmation that warns (in red) when the session
+  is part of the current curve ("The curve stays as it is until you build a new one"); afterwards `Session #NNNN
+  deleted.` shows in green under the list until the next key. **X** no longer deletes.
+- **Build curve**: X asks first (16.4); `ends` column labelled as stock gauge %; the result shows `Stock 50/25/10
+  % = real ...` and, if there was a curve before, "The previous curve is kept as curve.bak". A skipped-session list
+  that doesn't fit ends in `...`.
+- **Curve graph**: the old Show graph; hint on the same row as every other screen, axis label `stock`.
+
+### 16.4 curve.bak and Restore previous curve
+
+- `BatteryFs_WriteSafelyKeepOld(path, tmp, bak, ...)`: writes `tmp` (flushed; on failure nothing else is
+  touched), deletes `bak`, renames `path` → `bak` (if that fails, e.g. no old file, `path` is deleted as before),
+  renames `tmp` → `path`. `BatteryFs_WriteSafely` is the same without a backup (`config.ini` keeps using it). At
+  every point a power cut leaves a valid `curve.bin` or a valid `curve.tmp`, as before.
+- `BatteryCurve_Build` uses it with `/luma/battery/curve.bak`: the curve that was active before the build is kept.
+- **Advanced > Restore previous curve** reads `curve.bak`, validates it like the loader (`BatteryCurve_FileIsValid`;
+  missing or invalid → "nothing was changed"), shows the sessions of both curves and asks; then
+  `BatteryCurve_RestoreBackup` writes the backup through `curve.tmp` with the same call (so the current `curve.bin`
+  becomes `curve.bak` and a second restore switches back) and reloads the curve. The LED and bars use it from the
+  next poll, like after a build.
+- The loader never reads `curve.bak`. It is the only new file; it lives next to `curve.bin`.
+
+### 16.5 Setup guide and the Power LED question
+
+- **Setup guide**: five steps (charge to 100 % and unplug; Start recording; play until it switches itself off;
+  Build curve; Settings > Power LED: corrected), each ticked in green from the current state: a loaded curve ticks
+  1–4 (a curve is only built from usable sessions); otherwise the sessions are scanned ("Reading sessions...")
+  for a usable one, and recording / a stock gauge ≥ 95 % off the charger tick the first steps. Step 5 is
+  `led_override`. While recording a last line shows the session and its time.
+- After the **first** successful build (no curve before) with the Power LED stock: "Use it for the power LED
+  too?" `A: yes, turn on  B: later`. Yes sets `led_override=1` through `BatteryLed_SetConfig`, exactly like the
+  Settings row. The default stays off.
+
+### 16.6 Smaller fixes
+
+- LED / Sleep LED / bars texts now say "always blue while charging" and "held while charging" (13.3, 15.3).
+- Diagnostics: `LED control: OFF` instead of `LED override: OFF (override off)`; the `bars patch:` lines fit
+  (15.6); the temperature follows Rosalina's °C / °F setting.
+- Footer: `3.6%→29.9%` instead of `3.6% c29.9%` (15.5).
+- Every user line was checked against the 49-character body width and every screen against the 17 body lines;
+  shorter texts are padded so the 1 s redraws leave no residue.
+
+### 16.7 Code and host tests
+
+| File | Change |
+|---|---|
+| `source/battery/battery_menu.c` | tree, Settings editor, recording entry, Sessions, Build confirmation, Restore, Setup guide, Limits and about, text-screen helpers |
+| `include/battery/battery_menu.h` | only `batteryMenu` |
+| `source/battery/battery_led.c` | the three `BatteryMenu_Update*Title` calls removed |
+| `source/battery/battery_led_logic.c/.h` | `BatteryLedConfig_Step`, `BatterySetting` |
+| `source/battery/battery_sessions.c/.h` | `BatteryFs_WriteSafelyKeepOld`, `BatterySessions_StartCheck`, `BATTERY_SESSION_COMPLETE_START_X10` |
+| `source/battery/battery_curve_sd.c`, `include/battery/battery_curve.h` | `curve.bak` on build, `BatteryCurve_BackupInfo`, `BatteryCurve_RestoreBackup` |
+| `source/menu.c` | footer arrow |
+
+Host tests (`tests/battery/run_host_test.sh`): `led_host_test` steps every setting in both directions, checks the
+limits and a 20000-step random walk that Sanitize never changes; `sd_host_test` checks the keep-old write (no old
+file, then twice), that a second `BatteryCurve_Build` leaves the first curve byte-identical in `curve.bak`, that
+restore swaps the two files (twice) and reloads, that a truncated or corrupted `curve.bak` is refused without
+touching `curve.bin`, and the start check (94.9 / 95.0 %, charger).
+
+### 16.8 Safety
+
+No new MCU write (`BatteryMcu_SetPowerLedMode` is still the only one, called from `battery_led.c` only), no new
+ptm patch site or value, no menu code calling `BatteryPtmPatch_Apply` / `BatteryBars_Apply`; settings go through
+`BatteryLed_SetConfig` only, and the LED test keeps `BatteryLed_TestBegin / End`. The only new SD path is
+`/luma/battery/curve.bak`. Nothing on NAND or firmware.
+
+### 16.9 On-device test plan
+
+1. Battery Manager shows Settings, Learning..., Setup guide, Advanced...; the footer shows `x.x%→y.y%`.
+2. Settings: change each row with Left / Right (limits as before), SELECT undoes, B shows `Saved.`; reopen: values
+   kept; check `config.ini`. Change nothing and press B: `config.ini` not rewritten (timestamp). Power LED
+   corrected → the LED follows as before; HOME Menu bars stock / corrected → the icon follows within ~8 s.
+3. Advanced > Blue LED type 1 / 5 behaves like the old Thresholds row.
+4. Learning: Start recording at < 95 % warns; B cancels, A starts; on the charger it explains and doesn't start.
+   The entry turns into `Stop recording #NNNN h:mm:ss` and the time ticks; Stop asks first.
+5. Sessions: `*` on the curve's sessions; Y on one of them warns in red; delete a test session → green feedback;
+   X does nothing.
+6. Build curve: X asks; B cancels without rebuilding; A builds and says the previous curve was kept; Advanced >
+   Restore previous curve shows both curves and swaps them (twice = back). `curve.bak` is next to `curve.bin`.
+7. Setup guide ticks match the state.
+8. Advanced > Diagnostics as Status before (no line cut off; °F if Rosalina is set to °F).
+
+### 16.10 Deferred
+
+From the review, left for a later round: a custom Battery Manager home screen with a summary block, Diagnostics
+in pages (which would also give room to show the LED error and the boot timings at the same time, now one slot)
+and one voltage formula on user screens (Diagnostics shows `raw × 5/256`, the footer Rosalina's `raw × 0.02`).
