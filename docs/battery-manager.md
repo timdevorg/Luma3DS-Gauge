@@ -9,18 +9,18 @@ red only appear when the battery is actually low.
 > (sessions 0001 and 0002, [section 10](#10-findings-from-session-0001)).
 > LED control (milestone 4, [section 12](#12-led-control-milestone-4)) tested on hardware (LED test,
 > override on); four issues found there (lid, charger, boot, power off) are fixed in
-> [section 13](#13-on-device-results-and-refinements-milestone-4b), **not yet re-tested on hardware**.
+> [section 13](#13-on-device-results-and-refinements-milestone-4b), **tested on hardware (2026-11-16)**.
 > It is the only code that writes to the MCU (reg `0x29`, mode byte only) and is **off** until you
 > switch it on in the menu. Since [section 14](#14-ptm-sleep-and-wake-led-patch-milestone-4c) it also changes two
 > verified bytes in the running ptm process's RAM so that ptm's own sleep and wake LED commands match the
 > corrected level. The sleep byte at a blue level (13.10), the red-level `04` / `04` and the stock blink case
-> (13.12) are **tested on hardware**; "charging = always blue" (13.3) is **not yet tested on hardware** (14.9).
+> (13.12) are **tested on hardware**; "charging = always blue" (13.3) and the sleep LED (dim, bright, red, blink) are **tested on hardware (2026-11-16)**.
 > [Section 15](#15-ptm-battery-bars-patch-milestone-5) adds a second, independent ptm patch (four verified bytes) so
 > that HOME Menu's battery bars follow the corrected % too (default on, level held while charging); **tested on
 > hardware** (15.11).
 > [Section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak) reorganises the menu (one Settings
 > screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **tested on hardware**. The home
-> screen with a live summary and the paged Diagnostics (16.11–16.15) are **not yet tested on hardware**.
+> screen with a live summary and the paged Diagnostics (16.11–16.15) are **tested on hardware (2026-11-16)**.
 > [Section 17](#17-time-remaining) adds a time-remaining estimate ("Time left" on the home screen) from the corrected
 > % over the last 30 minutes; read-only, **not yet tested on hardware**.
 >
@@ -33,7 +33,8 @@ red only appear when the battery is actually low.
 
 After replacing a New 3DS XL battery with an aftermarket cell (iFixit), the
 power LED turns red and starts blinking ("1–5% left") while the console can
-still run for about another hour.
+still run for hours (at the stock red point, MCU 10 %, about a third of the charge
+was really left on the test console: MCU 10 % ≈ 33 % real, 5 % ≈ 31 %, 3 % ≈ 25 %).
 
 ## 2. Findings
 
@@ -136,7 +137,8 @@ the LED back.
 
    Each ptm patch verifies its own two 16-byte windows before every write and re-verifies them after it;
    each turns itself off for the boot on any mismatch, independently of the other. Never another process,
-   never another address, never NAND / firmware / SD.
+   never another address. The ptm patches and the MCU write never touch NAND, firmware or the SD card; the only SD
+   writes are the Battery Manager's own files under `/luma/battery/`.
 2. Never touch `0x05–0x07` (MCU unlock sequence, "danger zone").
 3. Open `mcu::HWC` briefly for each access and close it again, like Rosalina does
    (reasoning in section 12.4).
@@ -161,6 +163,8 @@ the LED back.
   - `/luma/battery/curve.bin`: built curve (161-point MCU table + 81-point voltage table, [section 11](#11-curve-builder--graph-milestone-3))
   - `/luma/battery/curve.bak`: the previous curve (same format), kept by Build curve and Restore previous curve ([16.4](#164-curvebak-and-restore-previous-curve))
   - `/luma/battery/curve_select.ini`: which sessions the curve builder uses
+  - `/luma/battery/config.tmp`, `curve.tmp`: short-lived temporary files for the safe write of `config.ini` /
+    `curve.bin` (12.6, 11.4, 16.4); the loader falls back to them after a power cut
 
 ### 4.2 Menu
 
@@ -278,13 +282,13 @@ Original plan below; the implementation is described in [section 12](#12-led-con
    *Done, tested on hardware (session 0001).* See sections 9 and 10.
 3. **Curve builder + graph** (originally planned after the LED experiment; done first because
    the recorded data was ready). *Done (code complete, builds, host test matches
-   `build_curve.py`; awaiting on-device test).* See section 11.
+   `build_curve.py`; tested on hardware).* See section 11.
 4. **LED control** (the planned "LED experiment" and "automatic LED control" in one): override toggle,
    thresholds, LED test screen, automatic control from `BatteryCurve_Corrected()`, re-assert
-   detection, sleep / shutdown hand-back. *Done (code complete, builds, host tests pass; awaiting
-   on-device test).* See section 12. Refinements after the on-device tests: section 13; ptm sleep and
+   detection, sleep / shutdown hand-back. *Done (code complete, builds, host tests pass; tested on hardware,
+   2026-11-16).* See section 12. Refinements after the on-device tests: section 13; ptm sleep and
    wake LED patch: section 14 (blue during sleep tested on hardware, 13.10).
-   HOME Menu battery bars from the corrected % (ptm patch): section 15 (milestone 5, awaiting on-device test).
+   HOME Menu battery bars from the corrected % (ptm patch): section 15 (milestone 5, tested on hardware).
 5. Optional extras (4.6). Document findings on 3dbrew.
 
 ## 8. Sources
@@ -1806,7 +1810,7 @@ charging", "only gets better while charging"), raw terms on user screens ("overr
 Status lines, a Build curve that overwrote the curve without asking, and an undocumented X that deleted sessions.
 This section is UI only: the LED, sleep, ptm and bars logic, the `config.ini` keys and defaults (LED override still
 **off** by default), the CSV format and `curve.bin` v1 are unchanged. 16.1–16.9 are **tested on hardware**; the home
-screen, the Diagnostics pages and the voltage change (16.11–16.15) are **not yet tested on hardware**.
+screen, the Diagnostics pages and the voltage change (16.11–16.15) are **tested on hardware (2026-11-16)**.
 
 ### 16.1 Tree
 

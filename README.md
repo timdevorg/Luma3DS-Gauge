@@ -7,7 +7,7 @@
 
 Luma3DS-Gauge adds a **Battery Manager** to the Rosalina menu for 3DS consoles with an **aftermarket battery**.
 With such a cell the console's fuel gauge (run by the MCU, which applies the stock battery's discharge curve)
-is wrong. The power LED turns red and starts blinking hours before the battery is really empty. The Battery
+is wrong. The power LED turns red and starts blinking hours before the battery is really empty (at the stock red point, about a third of the charge was really left on the test console). The Battery
 Manager learns the real discharge curve of your battery from recorded sessions and uses it to correct the LED
 and the HOME Menu battery icon. Everything else is plain Luma3DS v13.5.
 
@@ -33,7 +33,8 @@ Sleep LED and HOME Menu bars will stay stock.
 - **Menus:** a home screen with a live summary and a "Next:" hint, one Settings screen, Learning (record,
   sessions, build, graph), a Setup guide and Advanced (Diagnostics, LED test, restore previous curve, limits).
   The Rosalina footer shows `stock%→corrected%`.
-- Estimated time remaining on the Battery Manager home screen.
+- **Time remaining:** estimated on the Battery Manager home screen from the recent drain at the current load.
+  Appears after about 10 minutes on battery and resets after charging or sleep. Not shown in the footer.
 
 ### Safety model
 
