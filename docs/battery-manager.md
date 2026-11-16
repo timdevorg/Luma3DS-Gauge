@@ -21,6 +21,8 @@ red only appear when the battery is actually low.
 > [Section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak) reorganises the menu (one Settings
 > screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **tested on hardware**. The home
 > screen with a live summary and the paged Diagnostics (16.11–16.15) are **not yet tested on hardware**.
+> [Section 17](#17-time-remaining) adds a time-remaining estimate ("Time left" on the home screen) from the corrected
+> % over the last 30 minutes; read-only, **not yet tested on hardware**.
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -166,8 +168,9 @@ Current tree (since [section 16](#16-menu-clean-up-settings-screen-learning--adv
 Diagnostics pages since 16.11):
 
 ```
-Battery Manager...           home screen (16.11): live summary (battery %, charger, Power LED, HOME bars, Sleep LED,
-│                            curve, recording), a "Next:" hint, then the four entries (Up/Down, A opens, B back)
+Battery Manager...           home screen (16.11): live summary (battery %, time left (17), charger, Power LED, HOME
+│                            bars, Sleep LED, curve, recording), a "Next:" hint, then the four entries (Up/Down, A
+│                            opens, B back)
 ├─ Settings                  one editor: Power LED, Sleep LED, HOME Menu bars, Red LED at, Blinking red at,
 │                            4 bars from, 3 bars from (Left/Right change, SELECT undo, B save and back)
 ├─ Learning...
@@ -1959,6 +1962,7 @@ with a live summary, a hint, and the four former main-menu entries. Example (cur
 Battery Manager
 
  Battery      29.9 %       (stock gauge 3.6 %)
+ Time left    ~1h 05m      (at the current load)
  Charger      no
  Power LED    blue         corrected
  HOME bars    2 of 4       corrected
@@ -1974,7 +1978,6 @@ Battery Manager
   Setup guide
   Advanced...
 
-
 A: open  B: back                        3.70V 25°C
 ```
 
@@ -1982,6 +1985,7 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
 
 ```
  Battery      72.4 %       (stock, not corrected)
+ Time left    --           (needs a curve)
  Charger      no
  Power LED    stock        (console's own)
  HOME bars    stock        (needs a curve)
@@ -1995,7 +1999,8 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
 
 - **Rows** (`BatteryHome_Summary`, pure): `" <label 13><value 12> <note>"`, at most 49 characters. Battery = the corrected %
   (the LED's value, median voltage; instantaneous before the LED thread's first poll, as in Diagnostics) with the
-  stock gauge in brackets, or the stock gauge marked "not corrected" without a curve. Charger = no / charging /
+  stock gauge in brackets, or the stock gauge marked "not corrected" without a curve. Time left = the estimate of
+  [section 17](#17-time-remaining). Charger = no / charging /
   plugged in (not charging). Power LED = what the LED shows (blue / red / blinking red) and `corrected`, `corrected,
   charging`, `stock (console's own)`, `stock (needs a curve)` in teal, `error (see Diagnostics)` in red. HOME bars =
   `4 of 4` … `1 (red)`, `1 (blinking)` with `corrected` or `corrected, held` (charging), `stock`, `stock (needs a
@@ -2013,8 +2018,9 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
 - **Navigation**: Up/Down (wrapping, key repeat as in Rosalina menus), A opens, B goes back to the Rosalina menu.
   The cursor starts on Settings and is kept when an entry returns.
 - **Redraw**: every second (`waitInputWithTimeout(1000)`, like Diagnostics); every row is padded to 49
-  characters and the rows have fixed positions (7 summary rows, blank, 2 hint rows, blank, 4 entries, rest blank),
-  so nothing is left over when a value gets shorter or the hint disappears. 15 of the 17 body lines are used.
+  characters and the rows have fixed positions (8 summary rows since section 17, blank, 2 hint rows, blank, 4
+  entries, rest blank), so nothing is left over when a value gets shorter or the hint disappears. 16 of the 17 body
+  lines are used.
 - **Embedding the submenus**: Settings and Setup guide are called directly (they were `METHOD`s already).
   Learning... and Advanced... are opened with `menuShow(&batteryLearningMenu)` / `menuShow(&batteryAdvancedMenu)`
   on the unchanged `Menu` structs: Rosalina's own menu loop draws them, with the same items, the dynamic Start /
@@ -2153,3 +2159,95 @@ and `BatteryLed_SetConfig`.
    no line of another page remains; every value of the former screen is there (compare with 12.7, 14.5, 15.6).
    Page 1: both voltages; the boot and first-write timings show even while `LED error` is not `none`.
 8. The footer now shows 4.20 V (not 4.19 V) when Diagnostics says raw 210.
+
+## 17. Time remaining
+
+The home screen shows an estimate of the time left on battery, e.g. `Time left    ~2h 15m      (at the current
+load)`. Read-only: it only computes from values the LED thread already has.
+
+### 17.1 Why a straight line works
+
+The curve defines real% per session as `100 * (T_end - t) / T_end` (section 11): remaining runtime as a fraction of
+the session's runtime. Under a steady load the corrected % therefore falls linearly in time, and the time left is the
+corrected % divided by its rate of fall. A different load (brightness, Wi-Fi, 3D, game) changes the slope; the
+estimate follows it within the window below.
+
+### 17.2 Algorithm (`battery_eta_logic.c`, pure)
+
+- **Sampling**: the LED thread calls `BatteryEta_Update` after every successful MCU poll (1 s with the Power LED
+  corrected, 10 s with it stock), under `g_led.lock`, with the corrected % it has just computed (median voltage, as
+  shown everywhere). One sample (time in ms, corrected % × 100) is kept per minute, at most 32 (256 bytes, inside the
+  static `g_led`); the array is in time order and shifted once a minute when full, so the fit needs no copy on the
+  LED thread's 2 KB stack.
+- **Rate**: least-squares slope over the samples of the newest **30 minutes** (up to 31 samples). Until the samples
+  span **10 minutes** and there are at least 6 of them: `calculating`. The drain rate (−slope, % per minute) is
+  smoothed with an exponential moving average (α = 0.25 per new sample).
+- **Remaining**: `current corrected % / smoothed rate`, rounded to the nearest **5 minutes**; shown as `~2h 15m`,
+  `~2h 05m`, `~45m`, or `<5m` below 5 minutes. The value changes at most once a minute.
+- **Clamps**: slope ≥ 0 (flat or rising corrected %) or more than **24 h** → nothing (`--  (no steady drain)`).
+- **Starts over** (buffer and smoothed rate cleared) when:
+  - the charger is on: the LED logic's debounced charger state (`onCharger`, cleared only after 3 polls without
+    adapter and charging flag, 13.3) or the raw flags; samples start again after the debounced unplug;
+  - there is no curve (no corrected %);
+  - waking from sleep (0x213 or "fully awake" after a lid close / sleep request), and also when two polls are more
+    than **3 minutes** apart (the thread didn't run);
+  - the curve is reloaded (boot, Build curve, Restore previous curve): `BatteryCurve_Generation()` counts
+    `BatteryCurve_Load` calls.
+
+### 17.3 Display states (home screen, row 2)
+
+| State | Row |
+|---|---|
+| estimate | `Time left    ~2h 15m      (at the current load)` |
+| < 10 min of data (also before the first poll) | `Time left    calculating  (10 min on battery)` (teal) |
+| charging | `Time left    charging` |
+| no curve | `Time left    --           (needs a curve)` (teal) |
+| slope ≥ 0 or > 24 h | `Time left    --           (no steady drain)` (teal) |
+
+The value column is 12 characters, so the state reads `calculating` with the note, not `calculating...`.
+
+**Not in the Rosalina footer**: the footer line is 50 characters; on the right the fixed 26-character field holds
+`25°C 3.85V 72.4%→69.9%` (up to 25 characters), on the left `Luma3DS v13.5-xxxxxxxx` (22 characters in non-release
+builds) reaches to within 2 characters of that field. There is no clean room for `~2h 15m`, so the footer is unchanged.
+
+### 17.4 Limits
+
+- The estimate assumes the current load continues; it is not a prediction of a different use.
+- It starts over after sleep, charging and a curve change, so it shows `calculating` for 10 minutes each time.
+- Right after unplugging, the voltage relaxes and the corrected % can fall faster for a few minutes; the 30-minute
+  window and the smoothing dampen this, but the first estimate after 10 minutes may be a little short.
+- Its accuracy is that of the curve: with few sessions the corrected % (and so its slope) can bend near the ends.
+- Lost on reboot (RAM only). No SD format change: `curve.bin` and `config.ini` are unchanged; no new setting.
+
+### 17.5 Code, host tests, safety
+
+| File | Change |
+|---|---|
+| `source/battery/battery_eta_logic.c`, `include/battery/battery_eta_logic.h` | new, pure: sample buffer, slope, remaining, rounding, clamps, format |
+| `source/battery/battery_led.c`, `include/battery/battery_led.h` | `BatteryEta` in `g_led`, fed after each fresh poll; reset on wake / curve reload; `etaState` / `etaMinutes` in `BatteryLedStatus` |
+| `source/battery/battery_curve_sd.c`, `include/battery/battery_curve.h` | `BatteryCurve_Generation` |
+| `source/battery/battery_menu_logic.c`, `include/battery/battery_menu_logic.h` | `Time left` row (8 summary rows) |
+| `source/battery/battery_menu.c` | passes the estimate to the home screen |
+
+Host test `eta_host_test` (in `tests/battery/run_host_test.sh`): exact slope, rounding to 5 minutes, ≤ 0 and NaN
+rates, the 24 h clamp (1440 shown, 1450 not), the formats; a linear drain (calculating at 9 minutes, exact after
+10, within 5 minutes after 30 and after an hour with a full buffer at 10 s polls); a load change (follows a 5× faster
+drain); a noisy drain (±1.5 % per poll: within 15 % after 10 minutes, 10 % after 30, at most 15 minutes change
+between minutes); too little data; flat and rising; over 24 h; near empty (`<5m`); the resets (charging then
+unplug, no curve, a gap between polls, 10 s polls are no gap, explicit reset); the u32 tick wrap. `menu_host_test`
+checks every `Time left` text and the widths with the new row.
+
+Safety: no new MCU or ptm write, no new SD path, nothing on NAND. `BatteryEta_Update` only does arithmetic on values
+the poll already read; the menu only reads `BatteryLed_GetStatus`.
+
+### 17.6 On-device test plan
+
+1. With a curve, on battery: the home screen shows `calculating  (10 min on battery)` and, after about 10 minutes,
+   `~Xh YYm`. Compare with the clock: after 30 more minutes the value should have dropped by about 30 minutes
+   (± 10) at the same load.
+2. Plug the charger in: `charging` at once. Unplug: `calculating` after about 3 seconds (debounced unplug), an
+   estimate again 10 minutes later.
+3. Close the lid (sleep) for a minute and open it: `calculating` again.
+4. Advanced > Restore previous curve (or Build curve): `calculating` again.
+5. Without a curve (rename `curve.bin`, reboot): `--  (needs a curve)`.
+6. Raise the load (full brightness, Wi-Fi) for 20 minutes: the estimate falls faster than the clock.
