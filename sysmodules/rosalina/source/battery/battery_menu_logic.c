@@ -281,11 +281,25 @@ void BatteryHome_NextText(u8 step, const char **line1, const char **line2)
     }
 }
 
+bool BatteryHome_ConfigNote(char *out, const BatteryConfigReport *r)
+{
+    out[0] = 0;
+    if (!r->loaded || r->seen || r->saved)
+        return false;
+    if (r->count != 0)
+        sprintf(out, " config.ini: %lu value%s replaced (see Diagnostics)", (u32)r->count, r->count == 1 ? "" : "s");
+    else if (r->unknownCount != 0)
+        sprintf(out, " config.ini: %lu unknown key%s (see Diagnostics)", (u32)r->unknownCount, r->unknownCount == 1 ? "" : "s");
+    return out[0] != 0;
+}
+
 // ---- Diagnostics ----
 
 void BatteryDiag_Title(char *out, u32 page)
 {
-    static const char *const names[BATTERY_DIAG_PAGES] = { "Gauge and LED", "Sleep LED and ptm patches", "Recorder and curve" };
+    static const char *const names[BATTERY_DIAG_PAGES] = {
+        "Gauge and LED", "Sleep LED and ptm patches", "Recorder and curve", "Time left and config.ini",
+    };
     if (page >= BATTERY_DIAG_PAGES)
         page = 0;
     sprintf(out, "Diagnostics %lu/%lu - %s", page + 1, (u32)BATTERY_DIAG_PAGES, names[page]);
@@ -300,4 +314,113 @@ void BatteryDiag_FormatVoltage(char *line1, char *line2, u8 voltRaw)
     // "=" under "=" of line1 (its column depends on the digits of raw)
     memset(line2, ' ', n - 2);
     sprintf(line2 + n - 2, "= %lu.%02luV (x0.02, footer)", cv / 100, cv % 100);
+}
+
+// % per minute -> "12.3" % per hour (signed, at most -999.9 .. 999.9)
+static void formatRatePerHour(char *out, float perMin)
+{
+    float h = perMin * 60.0f;
+    bool neg = h < 0.0f;
+    if (neg)
+        h = -h;
+    if (!(h <= 999.9f))
+        h = 999.9f; // also NaN
+    u32 x10 = (u32)(h * 10.0f + 0.5f);
+    sprintf(out, "%s%lu.%lu", neg && x10 != 0 ? "-" : "", x10 / 10, x10 % 10);
+}
+
+// "25m", "3h", ">999h"
+static void formatAgeMin(char *out, u32 minutes)
+{
+    if (minutes < 60)
+        sprintf(out, "%lum", minutes);
+    else if (minutes / 60 <= 999)
+        sprintf(out, "%luh", minutes / 60);
+    else
+        memcpy(out, ">999h", 6);
+}
+
+void BatteryDiag_FormatEta(const BatteryEtaDiag *d, char *line1, char *line2, char *line3)
+{
+    char value[16], a[16], b[16];
+    switch (d->state)
+    {
+        case BATTERY_ETA_OK:
+            BatteryEta_Format(value, d->minutes);
+            sprintf(line1, "Time left:  %s", value);
+            break;
+        case BATTERY_ETA_PROVISIONAL:
+            BatteryEta_Format(value, d->minutes);
+            sprintf(line1, "Time left:  %s? (provisional)", value);
+            break;
+        case BATTERY_ETA_CHARGING:      sprintf(line1, "Time left:  charging"); break;
+        case BATTERY_ETA_NO_CURVE:      sprintf(line1, "Time left:  -- (no curve)"); break;
+        case BATTERY_ETA_UNKNOWN:       sprintf(line1, "Time left:  -- (no steady drain)"); break;
+        case BATTERY_ETA_CALCULATING:   sprintf(line1, "Time left:  calculating"); break;
+        default:                        sprintf(line1, "Time left:  no reading yet"); break;
+    }
+
+    // Smoothed (or kept) rate, then the raw slope of the newest window, both in % per hour
+    int n;
+    if (d->haveRate)
+    {
+        formatRatePerHour(a, d->rate);
+        n = sprintf(line2, "Drain %%/h:  %s smoothed, ", a);
+    }
+    else if (d->haveProv)
+    {
+        formatRatePerHour(a, d->provRate);
+        formatAgeMin(b, d->provAgeMin);
+        n = sprintf(line2, "Drain %%/h:  %s kept, %s old, ", a, b);
+    }
+    else
+        n = sprintf(line2, "Drain %%/h:  none yet, ");
+    if (d->haveSlope)
+    {
+        formatRatePerHour(a, d->windowDrain);
+        sprintf(line2 + n, "%s window", a);
+    }
+    else
+        sprintf(line2 + n, "no window yet");
+
+    u32 spanMin = d->spanMs / 60000u;
+    if (d->haveReset)
+    {
+        formatAgeMin(a, d->resetAgeMs / 60000u);
+        sprintf(line3, "Reset:      %s ago (%s), %lu sample%s/%lum", a, BatteryEta_ResetName(d->resetReason), (u32)d->samples,
+                d->samples == 1 ? "" : "s", spanMin);
+    }
+    else
+        sprintf(line3, "Reset:      --, %lu sample%s/%lum", (u32)d->samples, d->samples == 1 ? "" : "s", spanMin);
+}
+
+void BatteryDiag_ConfigHeader(char *out, const BatteryConfigReport *r)
+{
+    bool tmp = r->source == BATTERY_CFG_SOURCE_TMP;
+    if (!r->loaded)
+        sprintf(out, "config.ini: not loaded yet");
+    else if (r->count != 0)
+        sprintf(out, "config.ini: %lu value%s replaced %s", (u32)r->count, r->count == 1 ? "" : "s",
+                tmp ? "(from config.tmp)" : "at boot");
+    else if (r->source == BATTERY_CFG_SOURCE_DEFAULTS && r->unknownCount == 0)
+        sprintf(out, "config.ini: not found, defaults used");
+    else if (r->unknownCount != 0)
+        sprintf(out, "config.ini: no values replaced %s", tmp ? "(from config.tmp)" : "at boot");
+    else
+        sprintf(out, "config.ini: all values valid %s", tmp ? "(from config.tmp)" : "at boot");
+}
+
+void BatteryDiag_ConfigIssue(char *out, const BatteryConfigIssue *is)
+{
+    sprintf(out, "  %s=%s: %s, used %lu", BatteryLedConfig_KeyName(is->key), is->raw,
+            is->kind == BATTERY_CFG_ISSUE_INVALID ? "not a number" : "out of range", (u32)is->used);
+}
+
+void BatteryDiag_ConfigUnknown(char *out, const BatteryConfigReport *r)
+{
+    out[0] = 0;
+    if (r->unknownCount == 1)
+        sprintf(out, "  unknown key %s ignored", r->unknown);
+    else if (r->unknownCount > 1)
+        sprintf(out, "  unknown key %s ignored (+%lu more)", r->unknown, (u32)r->unknownCount - 1);
 }

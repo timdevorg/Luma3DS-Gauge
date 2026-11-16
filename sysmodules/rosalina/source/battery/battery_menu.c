@@ -243,6 +243,7 @@ typedef struct BatteryDiagData
     BatteryBarsStatus bars;
     bool haveBak;               // curve.bak, read once when Diagnostics opens
     u16 bakCount;
+    BatteryConfigReport cfgRep; // what the boot load of config.ini replaced / ignored
 } BatteryDiagData;
 
 static BatteryDiagData g_diag; // menu thread only
@@ -494,6 +495,33 @@ static u32 batteryDiagRecorderCurve(u32 y, const BatteryDiagData *d, const Batte
     return y;
 }
 
+// Page 4: time left details (section 17) and what the boot load of config.ini replaced (12.6). Draw_Lock must be held.
+static u32 batteryDiagEtaConfig(u32 y, const BatteryDiagData *d)
+{
+    const BatteryConfigReport *r = &d->cfgRep;
+    char l1[64], l2[64], l3[64];
+
+    BatteryDiag_FormatEta(&d->led.eta, l1, l2, l3);
+    y = batteryMenuLine(y, d->led.eta.state == BATTERY_ETA_PROVISIONAL ? COLOR_TITLE : COLOR_WHITE, "%s", l1);
+    y = batteryMenuLine(y, COLOR_WHITE, "%s", l2);
+    y = batteryMenuLine(y, COLOR_WHITE, "%s", l3);
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+
+    BatteryDiag_ConfigHeader(l1, r);
+    y = batteryMenuLine(y, r->count != 0 ? COLOR_RED : COLOR_WHITE, "%s", l1);
+    for (u32 i = 0; i < r->count && i < BATTERY_CFG_KEYS; i++)
+    {
+        BatteryDiag_ConfigIssue(l1, &r->issue[i]);
+        y = batteryMenuLine(y, COLOR_WHITE, "%s", l1);
+    }
+    BatteryDiag_ConfigUnknown(l1, r);
+    if (l1[0] != 0)
+        y = batteryMenuLine(y, COLOR_WHITE, "%s", l1);
+    if (r->saved && (r->count != 0 || r->unknownCount != 0))
+        y = batteryMenuLine(y, COLOR_TITLE, "  saved since: config.ini has valid values now");
+    return y;
+}
+
 static void batteryMenuDiagnostics(void)
 {
     BatteryDiagData *d = &g_diag;
@@ -511,6 +539,7 @@ static void batteryMenuDiagnostics(void)
         BatteryLed_GetStatus(&d->led);
         BatteryPtmPatch_GetStatus(&d->ptm);
         BatteryBars_GetStatus(&d->bars);
+        BatteryLed_GetConfigReport(&d->cfgRep);
         const BatteryCurveFile *curve = page == 2 ? BatteryCurve_Snapshot() : NULL;
         BatteryDiag_Title(title, page);
 
@@ -521,12 +550,16 @@ static void batteryMenuDiagnostics(void)
             y = batteryDiagGaugeLed(y, d);
         else if (page == 1)
             y = batteryDiagPtm(y, d);
-        else
+        else if (page == 2)
             y = batteryDiagRecorderCurve(y, d, curve);
+        else
+            y = batteryDiagEtaConfig(y, d);
         batteryMenuPadBody(y);
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Left/Right or L/R: page  B: back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
+        if (page == BATTERY_DIAG_PAGE_ETA_CFG && d->cfgRep.loaded && !d->cfgRep.seen)
+            BatteryLed_ConfigReportSeen(); // shown: the home screen note is gone
 
         u32 pressed = waitInputWithTimeout(1000);
         if (pressed & KEY_B)
@@ -1694,6 +1727,8 @@ typedef struct BatteryHomeData
     BatteryLedStatus led;
     BatteryPtmPatchStatus ptm;
     BatteryBarsStatus bars;
+    BatteryConfigReport cfgRep;
+    char cfgNote[BATTERY_MENU_LINE_CHARS + 16];
 } BatteryHomeData;
 
 static BatteryHomeData g_home; // menu thread only (static: keeps the stack small under the nested menuShow)
@@ -1762,7 +1797,7 @@ static u32 batteryToneColor(u8 tone)
 // select, A opens, B goes back, like a Rosalina menu. Settings and Setup guide are called directly; Learning... and
 // Advanced... are opened with menuShow, so they behave exactly like before (same items, dynamic recording title, footer).
 // Layout (fixed rows, every one padded, so the 1 s redraw leaves no residue): 8 summary rows, blank, 2 hint rows,
-// blank, 4 entries; 16 of the 17 body lines.
+// blank, 4 entries, the config.ini note (usually blank); all 17 body lines.
 void BatteryMenu_Home(void)
 {
     BatteryHomeData *h = &g_home;
@@ -1779,6 +1814,8 @@ void BatteryMenu_Home(void)
 
         batteryHomeGather(h, &haveVoltTemp);
         BatteryHome_Summary(&h->in, h->lines);
+        BatteryLed_GetConfigReport(&h->cfgRep);
+        BatteryHome_ConfigNote(h->cfgNote, &h->cfgRep);
         u8 step = BatteryHome_NextStep(&h->in);
         BatteryHome_NextText(step, &next1, &next2);
         bool fahrenheit = (lumaMcuConfig.flags & MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT) != 0;
@@ -1804,6 +1841,8 @@ void BatteryMenu_Home(void)
             Draw_DrawFormattedString(30, y, COLOR_WHITE, "%-*s", BATTERY_MENU_LINE_CHARS - 3, g_homeEntries[i].title);
             y += SPACING_Y;
         }
+        // Last body line: config.ini values the boot load replaced, until Diagnostics 4/4 shows them or a save
+        y = batteryMenuLine(y, COLOR_TITLE, "%s", h->cfgNote);
         batteryMenuPadBody(y);
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "A: open  B: back");
         // Voltage (footer scale, raw x 0.02) and temperature, right-aligned in a fixed 11-char field like the footer

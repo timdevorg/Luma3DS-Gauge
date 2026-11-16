@@ -88,17 +88,34 @@ typedef enum BatteryNextStep
 u8 BatteryHome_NextStep(const BatteryHomeInputs *in);
 /// The hint's two lines (line2 may be ""), each at most 49 chars. Both "" for BATTERY_NEXT_NONE.
 void BatteryHome_NextText(u8 step, const char **line1, const char **line2);
+/// The config.ini note in the home screen's last body line (teal), e.g. " config.ini: 2 values replaced (see
+/// Diagnostics)" or " config.ini: 1 unknown key (see Diagnostics)". False (out = "") when there is nothing to say, the
+/// report was seen on Diagnostics 4/4, or config.ini was saved since.
+bool BatteryHome_ConfigNote(char *out, const BatteryConfigReport *r);
 
 // ---- Diagnostics ----
 
-#define BATTERY_DIAG_PAGES          3
+#define BATTERY_DIAG_PAGES          4
+#define BATTERY_DIAG_PAGE_ETA_CFG   3 // "Time left and config.ini"
 
-/// "Diagnostics 1/3 - Gauge and LED" etc. (page 0..2), at most 49 chars.
+/// "Diagnostics 1/4 - Gauge and LED" etc. (page 0..3), at most 49 chars.
 void BatteryDiag_Title(char *out, u32 page);
 /// The raw voltage byte (MCU 0x0D) in both scales, labelled (docs 16.13, open question):
 ///   line1 "Voltage:        raw 185 = 3.613V (x5/256)"
 ///   line2 "                        = 3.70V (x0.02, footer)"
 void BatteryDiag_FormatVoltage(char *line1, char *line2, u8 voltRaw);
+/// Time left details (Diagnostics 4/4), three lines of at most 49 chars:
+///   "Time left:  ~3h 10m? (provisional)"
+///   "Drain %/h:  30.0 smoothed, 29.4 window"        or "30.0 kept, 2h old, 31.2 window" (provisional)
+///   "Reset:      7m ago (wake), 8 samples/7m"
+void BatteryDiag_FormatEta(const BatteryEtaDiag *d, char *line1, char *line2, char *line3);
+/// "config.ini: all values valid at boot", "config.ini: 2 values replaced at boot", "... (from config.tmp)",
+/// "config.ini: not found, defaults used", "config.ini: not loaded yet". At most 49 chars.
+void BatteryDiag_ConfigHeader(char *out, const BatteryConfigReport *r);
+/// "  red_pct=0: out of range, used 1", "  led_override=x: not a number, used 0". At most 49 chars.
+void BatteryDiag_ConfigIssue(char *out, const BatteryConfigIssue *is);
+/// "  unknown key foo ignored", "  unknown key foo ignored (+2 more)"; "" without unknown keys. At most 49 chars.
+void BatteryDiag_ConfigUnknown(char *out, const BatteryConfigReport *r);
 
 // ---- Shared formatting ----
 

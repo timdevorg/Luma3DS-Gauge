@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "fmt.h"
 #include "battery/battery_menu_logic.h"
 #include "battery/battery_mcu.h"
@@ -349,10 +350,12 @@ static void testDiagnostics(void)
         BatteryDiag_Title(t, p);
         CHECK(strlen(t) <= BATTERY_MENU_LINE_CHARS);
         CHECK(strncmp(t, "Diagnostics ", 12) == 0);
-        CHECK(t[12] == (char)('1' + (p < BATTERY_DIAG_PAGES ? p : 0)) && strncmp(t + 13, "/3 - ", 5) == 0);
+        CHECK(t[12] == (char)('1' + (p < BATTERY_DIAG_PAGES ? p : 0)) && strncmp(t + 13, "/4 - ", 5) == 0);
     }
     BatteryDiag_Title(t, 0);
-    CHECK(strcmp(t, "Diagnostics 1/3 - Gauge and LED") == 0);
+    CHECK(strcmp(t, "Diagnostics 1/4 - Gauge and LED") == 0);
+    BatteryDiag_Title(t, BATTERY_DIAG_PAGE_ETA_CFG);
+    CHECK(strcmp(t, "Diagnostics 4/4 - Time left and config.ini") == 0);
 
     BatteryDiag_FormatVoltage(l1, l2, 185);
     CHECK(strcmp(l1, "Voltage:        raw 185 = 3.613V (x5/256)") == 0);
@@ -402,12 +405,182 @@ static void testDiagnostics(void)
     printf("diagnostics: titles, voltage lines, volt/temp (max %u chars), durations OK\n", maxLen);
 }
 
+// Diagnostics 4/4: the three time-left lines (every state x rate kind x window x reset reason, widest numbers) and the
+// config.ini lines (widest key / value / count), all at most 49 chars; expected texts; the home screen note
+static void testEtaConfigPage(void)
+{
+    static const float rates[] = { 0.0f, 0.0004f, 0.5f, 16.665f, 1000.0f, -0.01f, -1000.0f, NAN };
+    static const u32 ages[] = { 0, 59, 60, 59999, 60000, 0xFFFFFFFFu };
+    char l1[256], l2[256], l3[256];
+    u32 n = 0, maxLen = 0;
+    for (u8 state = 0; state <= BATTERY_ETA_PROVISIONAL + 1; state++)
+        for (u32 kind = 0; kind < 3; kind++)
+            for (u32 r = 0; r < sizeof(rates) / sizeof(rates[0]); r++)
+                for (u32 a = 0; a < sizeof(ages) / sizeof(ages[0]); a++)
+                    for (u8 reason = 0; reason <= BATTERY_ETA_RESET_NO_CURVE + 1; reason++)
+                        for (u32 slope = 0; slope <= 1; slope++)
+                        {
+                            BatteryEtaDiag d;
+                            memset(&d, 0, sizeof(d));
+                            d.state = state;
+                            d.minutes = (a & 1) ? BATTERY_ETA_MAX_MINUTES : 23 * 60 + 55;
+                            d.haveRate = kind == 1;
+                            d.haveProv = kind == 2;
+                            d.rate = d.provRate = rates[r];
+                            d.provAgeMin = ages[a];
+                            d.haveSlope = slope;
+                            d.windowDrain = rates[(r + 5) % (sizeof(rates) / sizeof(rates[0]))];
+                            d.samples = BATTERY_ETA_SLOTS - 1;
+                            d.spanMs = BATTERY_ETA_WINDOW_MS;
+                            d.haveReset = reason <= BATTERY_ETA_RESET_NO_CURVE;
+                            d.resetReason = reason;
+                            d.resetAgeMs = ages[a] * 1000u;
+                            BatteryDiag_FormatEta(&d, l1, l2, l3);
+                            CHECK(strlen(l1) <= BATTERY_MENU_LINE_CHARS && strlen(l2) <= BATTERY_MENU_LINE_CHARS &&
+                                  strlen(l3) <= BATTERY_MENU_LINE_CHARS);
+                            u32 m = (u32)strlen(l1);
+                            m = strlen(l2) > m ? (u32)strlen(l2) : m;
+                            m = strlen(l3) > m ? (u32)strlen(l3) : m;
+                            maxLen = m > maxLen ? m : maxLen;
+                            n++;
+                        }
+
+    BatteryEtaDiag d;
+    memset(&d, 0, sizeof(d));
+    d.state = BATTERY_ETA_PROVISIONAL;
+    d.minutes = 190;
+    d.haveProv = true;
+    d.provRate = 0.5f;
+    d.provAgeMin = 125;
+    d.haveSlope = true;
+    d.windowDrain = 0.49f;
+    d.samples = 8;
+    d.spanMs = 7u * 60000u + 59000u;
+    d.haveReset = true;
+    d.resetReason = BATTERY_ETA_RESET_WAKE;
+    d.resetAgeMs = 8u * 60000u;
+    BatteryDiag_FormatEta(&d, l1, l2, l3);
+    CHECK(strcmp(l1, "Time left:  ~3h 10m? (provisional)") == 0);
+    CHECK(strcmp(l2, "Drain %/h:  30.0 kept, 2h old, 29.4 window") == 0);
+    CHECK(strcmp(l3, "Reset:      8m ago (wake), 8 samples/7m") == 0);
+    d.state = BATTERY_ETA_OK;
+    d.haveProv = false;
+    d.haveRate = true;
+    d.rate = 0.25f;
+    d.windowDrain = -0.004f;
+    d.samples = 1;
+    d.resetReason = BATTERY_ETA_RESET_CHARGER;
+    BatteryDiag_FormatEta(&d, l1, l2, l3);
+    CHECK(strcmp(l1, "Time left:  ~3h 10m") == 0);
+    CHECK(strcmp(l2, "Drain %/h:  15.0 smoothed, -0.2 window") == 0);
+    CHECK(strcmp(l3, "Reset:      8m ago (charger), 1 sample/7m") == 0);
+    d.state = BATTERY_ETA_CALCULATING;
+    d.haveRate = false;
+    d.haveSlope = false;
+    d.haveReset = false;
+    d.samples = 0;
+    d.spanMs = 0;
+    BatteryDiag_FormatEta(&d, l1, l2, l3);
+    CHECK(strcmp(l1, "Time left:  calculating") == 0 && strcmp(l2, "Drain %/h:  none yet, no window yet") == 0 &&
+          strcmp(l3, "Reset:      --, 0 samples/0m") == 0);
+
+    // config.ini lines
+    BatteryConfigReport r;
+    memset(&r, 0, sizeof(r));
+    char t[256];
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: not loaded yet") == 0);
+    CHECK(!BatteryHome_ConfigNote(t, &r) && t[0] == 0);
+    r.loaded = true;
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: not found, defaults used") == 0);
+    r.source = BATTERY_CFG_SOURCE_INI;
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: all values valid at boot") == 0);
+    CHECK(!BatteryHome_ConfigNote(t, &r));
+    BatteryDiag_ConfigUnknown(t, &r);
+    CHECK(t[0] == 0);
+    r.unknownCount = 1;
+    memcpy(r.unknown, "foo", 4);
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: no values replaced at boot") == 0);
+    BatteryDiag_ConfigUnknown(t, &r);
+    CHECK(strcmp(t, "  unknown key foo ignored") == 0);
+    CHECK(BatteryHome_ConfigNote(t, &r) && strcmp(t, " config.ini: 1 unknown key (see Diagnostics)") == 0);
+    r.count = 2;
+    r.issue[0].key = BATTERY_CFG_KEY_RED;
+    r.issue[0].kind = BATTERY_CFG_ISSUE_RANGE;
+    r.issue[0].used = 1;
+    memcpy(r.issue[0].raw, "0", 2);
+    r.issue[1].key = BATTERY_CFG_KEY_OVERRIDE;
+    r.issue[1].kind = BATTERY_CFG_ISSUE_INVALID;
+    r.issue[1].used = 0;
+    memcpy(r.issue[1].raw, "yes", 4);
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: 2 values replaced at boot") == 0);
+    BatteryDiag_ConfigIssue(t, &r.issue[0]);
+    CHECK(strcmp(t, "  red_pct=0: out of range, used 1") == 0);
+    BatteryDiag_ConfigIssue(t, &r.issue[1]);
+    CHECK(strcmp(t, "  led_override=yes: not a number, used 0") == 0);
+    CHECK(BatteryHome_ConfigNote(t, &r) && strcmp(t, " config.ini: 2 values replaced (see Diagnostics)") == 0);
+    r.seen = true;
+    CHECK(!BatteryHome_ConfigNote(t, &r) && t[0] == 0);
+    r.seen = false;
+    r.saved = true;
+    CHECK(!BatteryHome_ConfigNote(t, &r));
+    r.saved = false;
+    r.count = 1;
+    r.source = BATTERY_CFG_SOURCE_TMP;
+    BatteryDiag_ConfigHeader(t, &r);
+    CHECK(strcmp(t, "config.ini: 1 value replaced (from config.tmp)") == 0);
+    CHECK(BatteryHome_ConfigNote(t, &r) && strcmp(t, " config.ini: 1 value replaced (see Diagnostics)") == 0);
+
+    // Widest: every key with a 7-char value, 255 used; 8 issues; 255 unknown keys with a 12-char name
+    u32 cfgMax = 0;
+    r.count = BATTERY_CFG_KEYS;
+    r.unknownCount = 255;
+    memcpy(r.unknown, "abcdefghijkl", 13);
+    for (u8 src = 0; src <= BATTERY_CFG_SOURCE_TMP; src++)
+        for (u32 c = 0; c <= BATTERY_CFG_KEYS; c++)
+        {
+            r.source = src;
+            r.count = (u8)c;
+            BatteryDiag_ConfigHeader(t, &r);
+            cfgMax = strlen(t) > cfgMax ? (u32)strlen(t) : cfgMax;
+            CHECK(strlen(t) <= BATTERY_MENU_LINE_CHARS);
+            BatteryHome_ConfigNote(t, &r);
+            CHECK(strlen(t) <= BATTERY_MENU_LINE_CHARS);
+        }
+    BatteryDiag_ConfigUnknown(t, &r);
+    CHECK(strcmp(t, "  unknown key abcdefghijkl ignored (+254 more)") == 0 && strlen(t) <= BATTERY_MENU_LINE_CHARS);
+    r.count = 0;
+    BatteryHome_ConfigNote(t, &r);
+    CHECK(strcmp(t, " config.ini: 255 unknown keys (see Diagnostics)") == 0);
+    for (u8 k = 0; k <= BATTERY_CFG_KEYS; k++)
+        for (u8 kind = 0; kind <= BATTERY_CFG_ISSUE_RANGE; kind++)
+        {
+            BatteryConfigIssue is;
+            is.key = k;
+            is.kind = kind;
+            is.used = 255;
+            memcpy(is.raw, "9999999", 8);
+            BatteryDiag_ConfigIssue(t, &is);
+            cfgMax = strlen(t) > cfgMax ? (u32)strlen(t) : cfgMax;
+            CHECK(strlen(t) <= BATTERY_MENU_LINE_CHARS);
+        }
+    // Page 4 fits the body: 3 time-left lines, blank, header, 8 issues, unknown, "saved since"
+    CHECK(3 + 1 + 1 + BATTERY_CFG_KEYS + 1 + 1 <= BATTERY_MENU_BODY_LINES);
+    printf("diagnostics 4/4: %u time-left inputs (max %u chars), config.ini lines (max %u chars), home note OK\n", n, maxLen,
+           cfgMax);
+}
+
 int main(void)
 {
     testSummaryWidths();
     testSummaryTexts();
     testNextStep();
     testDiagnostics();
+    testEtaConfigPage();
     printf(g_failures == 0 ? "menu host test: OK\n" : "menu host test: %d FAILURES\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
