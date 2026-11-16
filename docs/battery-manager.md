@@ -169,14 +169,15 @@ the LED back.
 ### 4.2 Menu
 
 Current tree (since [section 16](#16-menu-clean-up-settings-screen-learning--advanced-curvebak), home screen and
-Diagnostics pages since 16.11):
+Diagnostics pages since 16.11, Diagnostics 4/4 and Reset to defaults since 16.16):
 
 ```
 Battery Manager...           home screen (16.11): live summary (battery %, time left (17), charger, Power LED, HOME
 │                            bars, Sleep LED, curve, recording), a "Next:" hint, then the four entries (Up/Down, A
 │                            opens, B back)
 ├─ Settings                  one editor: Power LED, Sleep LED, HOME Menu bars, Red LED at, Blinking red at,
-│                            4 bars from, 3 bars from (Left/Right change, SELECT undo, B save and back)
+│                            4 bars from, 3 bars from (Left/Right change, SELECT undo, Y reset to defaults
+│                            (16.16), B save and back)
 ├─ Learning...
 │  ├─ Start recording        or "Stop recording  #0005  1:23:05" while recording (one entry)
 │  ├─ Sessions               usable / partial / sleep gap / recording, * = in the current curve; A details, Y delete
@@ -184,8 +185,8 @@ Battery Manager...           home screen (16.11): live summary (battery %, time 
 │  └─ Curve graph            corrected curve vs stock (diagonal) + min/max band
 ├─ Setup guide               five steps, ticked from the current state
 └─ Advanced...
-   ├─ Diagnostics            the former Status screen in 3 pages (Left/Right or L/R): 1 gauge and LED, 2 Sleep LED
-   │                         and ptm patches, 3 recorder and curve (16.12)
+   ├─ Diagnostics            the former Status screen in 4 pages (Left/Right or L/R): 1 gauge and LED, 2 Sleep LED
+   │                         and ptm patches, 3 recorder and curve (16.12), 4 time left and config.ini (16.16, 17.8)
    ├─ LED test               write each LED mode by hand, with read-back
    ├─ Blue LED type          blue_mode 5 (red off, blue on, default) / 1 (forced blue), same editor as Settings
    ├─ Restore previous curve curve.bak ↔ curve.bin
@@ -823,7 +824,10 @@ bars_3=40
 | `blue_mode` | 5 | 5 (red off, blue on) or 1 (forced default blue) |
 | `sleep_mode` | 1 | 1 (dim), 5 (bright) or 0 (off); legacy `2`, `system`, `anim` = 0 (12.11); anything else (3, 4, 6, 7, 255, `-1`, text) = 1 |
 
-Missing file or keys = defaults (so the override is **off** after the first install). Written by the
+Missing file or keys = defaults (so the override is **off** after the first install). Invalid or out-of-range
+values are replaced as in the table (and by the order rules, `BatteryLedConfig_Sanitize`); since 16.16 the boot load
+records which keys were replaced, with what, and the unknown keys, and shows that once (home screen note,
+Diagnostics 4/4). Written by the
 menu only (the Settings and Blue LED type screens when they are left with a change, and the "turn on the Power
 LED?" question after the first curve), safely like `curve.bin` (`config.tmp`, delete, rename; the loader falls back to
 `config.tmp`). Loaded by the LED thread as soon as the SD card can be opened (13.4), or earlier when a
@@ -841,17 +845,18 @@ Since section 16 (tree in 4.2):
   at`, `Blinking red at`, `4 bars from`, `3 bars from` (`red_pct`, `blink_pct`, `bars_4`, `bars_3`; Left/Right keep
   blink < red < 3 bars < 4 bars ≤ 100 and red ≤ 50, `BatteryLedConfig_Step`). Without a curve a red line says the
   Power LED and the bars stay stock. Nothing changes until the screen is left (the old entries toggled as soon as
-  they were opened).
+  they were opened). **Y** resets every setting to its default after a confirmation, as an unsaved change (16.16).
 - **Advanced > Blue LED type**: the same editor with one row, `blue_mode` 5 (`red off, blue on`) / 1 (`forced
   blue`).
 - **Advanced > LED test**: Up/Down select a mode (0–6), A writes it; shows what was written, the `0x29`
   read-back and the red / blue state (refreshed 4× per second). Normal control pauses while the
   screen is open and is restored on exit.
-- **Advanced > Diagnostics** (formerly Status; three pages since 16.12): corrected % (the LED's input, with the
+- **Advanced > Diagnostics** (formerly Status; three pages since 16.12, four since 16.16): corrected % (the LED's input, with the
   median voltage), `LED control: ON (reason)` (`active`, `no curve`, `charger`, `lid closed`, …, `fast poll`; just `OFF` when off),
   desired and read-back mode, red / blue state, last written mode, re-asserts (boot / session, MCU % at the last
   one), the `Sleep:` diagnostics line (12.11), the `ptm patch:` line (14.5), the `bars patch:` line (15.6),
-  errors. The temperature follows Rosalina's °C / °F setting.
+  errors; page 4: the time-left details (17.8) and what the boot load of `config.ini` replaced (16.16). The
+  temperature follows Rosalina's °C / °F setting.
 
 ### 12.8 Host tests
 
@@ -2023,8 +2028,8 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
   The cursor starts on Settings and is kept when an entry returns.
 - **Redraw**: every second (`waitInputWithTimeout(1000)`, like Diagnostics); every row is padded to 49
   characters and the rows have fixed positions (8 summary rows since section 17, blank, 2 hint rows, blank, 4
-  entries, rest blank), so nothing is left over when a value gets shorter or the hint disappears. 16 of the 17 body
-  lines are used.
+  entries, and since 16.16 the `config.ini` note, usually blank), so nothing is left over when a value gets shorter
+  or the hint disappears. All 17 body lines are used.
 - **Embedding the submenus**: Settings and Setup guide are called directly (they were `METHOD`s already).
   Learning... and Advanced... are opened with `menuShow(&batteryLearningMenu)` / `menuShow(&batteryAdvancedMenu)`
   on the unchanged `Menu` structs: Rosalina's own menu loop draws them, with the same items, the dynamic Start /
@@ -2038,6 +2043,8 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
   `BatteryCurve_Snapshot`, and `BatteryLed_EnsureConfigLoaded` once on entry (as Settings does).
 
 ### 16.12 Diagnostics in three pages
+
+(A fourth page, `Time left and config.ini`, was added in 16.16; the titles now read `1/4` … `4/4`.)
 
 Left / Right or L / R switch pages (wrapping); the page is in the title; refreshed every second as before; each
 page is padded to the 17 body lines and the screen is cleared on a page change, so no line of another page stays.
@@ -2164,6 +2171,82 @@ and `BatteryLed_SetConfig`.
    Page 1: both voltages; the boot and first-write timings show even while `LED error` is not `none`.
 8. The footer now shows 4.20 V (not 4.19 V) when Diagnostics says raw 210.
 
+### 16.16 Settings: reset to defaults; config.ini report
+
+**Reset to defaults.** In Settings, **Y** opens a confirmation that lists the default of every `config.ini` setting
+(Power LED stock, Sleep LED dim blue, HOME Menu bars corrected, red 10 %, blinking 3 %, 4 bars 70 %, 3 bars 40 %, and
+Blue LED type `red off, blue on (5)`, which has its own screen under Advanced). **A** takes them into the editor,
+**B** cancels. The editor's last body line reads `Y: reset to defaults`, next to `Not saved yet.` once something
+changed.
+
+- Model: the defaults are an **unsaved edit**, like a Left/Right step. **B** saves them with the one
+  `BatteryLed_SetConfig` on the way out, **SELECT** undoes them (back to what was saved). Chosen over saving at once
+  because the editor already has exactly one save point; nothing new is needed for undo, the "Not saved yet." line,
+  the save error screen, or the F2 rule: closed by the lid / a sleep request, `config.ini` is written and the
+  settings become active only once the console is awake again (12.6 / F2, `cfgPending`). If the lid closes while
+  the confirmation is open, it counts as **B** (nothing reset); earlier edits are saved as before.
+- Only `config.ini` is written (by that save). Sessions, `curve.bin`, `curve.bak` and `curve_select.ini` are never
+  touched. Advanced > Blue LED type has no Y.
+
+**config.ini report.** `BatteryLedConfig_ParseChecked` (pure, `battery_led_logic.c`) records per key what the file
+said (the last line of a key counts) and `BatteryConfigCheck_Issues` compares it with the sanitized result:
+
+- **not a number**: the value before (the default) is kept, e.g. `led_override=yes`, `red_pct=`, `red_pct=-1`,
+  `sleep_mode=systemx`. Text after a number (`red_pct=12abc`) uses the number, as before, and is reported too.
+- **out of range**: a number `BatteryLedConfig_Sanitize` had to change (range or order), e.g. `red_pct=0` → 1,
+  `blink_pct=9` with `red_pct=5` → 4, `bars=2` → 1, a bars pair that doesn't fit → 70 / 40 (each key only if its
+  own value changed). A key the file doesn't contain is never reported, even if the order rules move it (e.g.
+  `bars_3` after `red_pct=45`). Legacy `sleep_mode` 2 / `system` / `anim` are not issues.
+- **unknown keys** (`name=value` with a name that isn't a key, also typos and leading spaces): **reported** (count
+  and the first name, cut at 12 characters) and otherwise ignored, as before. They are lost at the next save
+  (`BatteryLed_SetConfig` writes all keys afresh).
+- Source: `config.ini`, `config.tmp` (power cut during a save) or the defaults. The parse result is the same as
+  before (host test: 100 000 random files give the same config with and without the check).
+
+Where it shows:
+
+- Home screen, the last body line (teal), until Diagnostics 4/4 was shown or `config.ini` was saved:
+  ` config.ini: 2 values replaced (see Diagnostics)`, or ` config.ini: 1 unknown key (see Diagnostics)` when only
+  unknown keys were found. Nothing when everything was valid.
+- Advanced > Diagnostics 4/4, below the time-left lines:
+
+```
+config.ini: 2 values replaced at boot
+  led_override=yes: not a number, used 0
+  red_pct=0: out of range, used 1
+  unknown key foo ignored (+1 more)
+  saved since: config.ini has valid values now
+```
+
+  The header is red with replaced values; otherwise `all values valid at boot`, `no values replaced at boot` (only
+  unknown keys), `not found, defaults used`, `... (from config.tmp)`, or `not loaded yet`. The last line appears
+  after a save.
+
+Code: `BatteryLedConfig_ParseChecked`, `BatteryConfigCheck_Issues`, `BatteryLedConfig_KeyName` / `_KeyValue`
+(`battery_led_logic.c`); `BatteryConfigReport` in `g_led`, `BatteryLed_GetConfigReport`,
+`BatteryLed_ConfigReportSeen`, "saved" set by a successful `BatteryLed_SetConfig` (`battery_led.c`; the check
+buffers are static, the boot load runs on the LED thread's 2 KB stack); `BatteryHome_ConfigNote`,
+`BatteryDiag_ConfigHeader` / `_ConfigIssue` / `_ConfigUnknown` (`battery_menu_logic.c`, pure);
+`batteryConfirmDefaults`, `batteryDiagEtaConfig` (`battery_menu.c`). Host tests: `led_host_test` (every kind of
+issue, last line wins, unknown keys, random files), `menu_host_test` (every line ≤ 49 characters with the widest key,
+value, count and name; expected texts; the note's seen / saved rules; page 4 fits the 17 body lines).
+
+Safety: no new write. The report is RAM only; `config.ini` is written only by the existing save. The reset only
+changes the editor's copy of the settings.
+
+On-device test plan:
+
+1. Put `red_pct=0`, `led_override=yes` and `foo=1` into `/luma/battery/config.ini`, reboot. Home screen: teal
+   ` config.ini: 2 values replaced (see Diagnostics)`. Diagnostics 4/4: the two lines above plus
+   `unknown key foo ignored`; back on the home screen the note is gone.
+2. Reboot again (file unchanged): the note is back. Open Settings, change something, B: the note is gone and
+   `config.ini` holds valid values only (no `foo`); Diagnostics 4/4 shows `saved since: ...`.
+3. Settings, Y: the confirmation lists the defaults; B: nothing changed. Y, A: the rows show the defaults and
+   `Not saved yet.`; SELECT: back. Y, A, B: `Saved.`, `config.ini` has the defaults, the sessions, `curve.bin`,
+   `curve.bak` and `curve_select.ini` are unchanged (dates on the SD card).
+4. Settings with a change (or Y, A), close the lid: after opening it the defaults are active (Power LED stock), as
+   with any change saved on a lid close.
+
 ## 17. Time remaining
 
 The home screen shows an estimate of the time left on battery, e.g. `Time left    ~2h 15m      (at the current
@@ -2189,14 +2272,15 @@ estimate follows it within the window below.
 - **Remaining**: `current corrected % / smoothed rate`, rounded to the nearest **5 minutes**; shown as `~2h 15m`,
   `~2h 05m`, `~45m`, or `<5m` below 5 minutes. The value changes at most once a minute.
 - **Clamps**: slope ≥ 0 (flat or rising corrected %) or more than **24 h** → nothing (`--  (no steady drain)`).
-- **Starts over** (buffer and smoothed rate cleared) when:
+- **Starts over** (buffer cleared) when the following happens; the smoothed rate is **kept as a provisional rate**
+  after a wake or a gap (17.7) and **discarded** in every other case:
   - the charger is on: the LED logic's debounced charger state (`onCharger`, cleared only after 3 polls without
     adapter and charging flag, 13.3) or the raw flags; samples start again after the debounced unplug;
   - there is no curve (no corrected %);
   - waking from sleep (0x213 or "fully awake" after a lid close / sleep request), and also when two polls are more
-    than **3 minutes** apart (the thread didn't run);
+    than **3 minutes** apart (the thread didn't run): rate kept;
   - the curve is reloaded (boot, Build curve, Restore previous curve): `BatteryCurve_Generation()` counts
-    `BatteryCurve_Load` calls.
+    `BatteryCurve_Load` calls. A reload wins over a wake at the same poll.
 
 ### 17.3 Display states (home screen, row 2)
 
@@ -2207,8 +2291,10 @@ estimate follows it within the window below.
 | charging | `Time left    charging` |
 | no curve | `Time left    --           (needs a curve)` (teal) |
 | slope ≥ 0 or > 24 h | `Time left    --           (no steady drain)` (teal) |
+| after a wake / gap, < 10 min of new data (17.7) | `Time left    ~3h 10m?     (provisional)` (teal) |
 
-The value column is 12 characters, so the state reads `calculating` with the note, not `calculating...`.
+The value column is 12 characters, so the state reads `calculating` with the note, not `calculating...`; the
+provisional value is at most `~24h 00m?` (9 characters).
 
 **Not in the Rosalina footer**: the footer line is 50 characters; on the right the fixed 26-character field holds
 `25°C 3.85V 72.4%→69.9%` (up to 25 characters), on the left `Luma3DS v13.5-xxxxxxxx` (22 characters in non-release
@@ -2217,11 +2303,56 @@ builds) reaches to within 2 characters of that field. There is no clean room for
 ### 17.4 Limits
 
 - The estimate assumes the current load continues; it is not a prediction of a different use.
-- It starts over after sleep, charging and a curve change, so it shows `calculating` for 10 minutes each time.
+- It starts over after sleep, charging and a curve change. After charging and a curve change it shows `calculating`
+  for 10 minutes; after sleep (or a gap) the provisional estimate assumes the load from before the sleep for those
+  10 minutes.
 - Right after unplugging, the voltage relaxes and the corrected % can fall faster for a few minutes; the 30-minute
   window and the smoothing dampen this, but the first estimate after 10 minutes may be a little short.
 - Its accuracy is that of the curve: with few sessions the corrected % (and so its slope) can bend near the ends.
 - Lost on reboot (RAM only). No SD format change: `curve.bin` and `config.ini` are unchanged; no new setting.
+
+### 17.7 Provisional estimate after a wake or a gap
+
+A sleep usually doesn't change what the console is used for, so after a wake (or a poll gap) the estimate keeps the
+drain rate from before instead of showing `calculating` for 10 minutes:
+
+- `BatteryEta_Restart(WAKE / GAP)` empties the sample buffer but keeps the smoothed rate as the **provisional rate**
+  (or, after a second wake before the new window is ready, the provisional rate it already had).
+- Until the new window has the usual 10 minutes / 6 samples, every new sample (once a minute) gives
+  `current corrected % / provisional rate`, rounded like a normal estimate: state `BATTERY_ETA_PROVISIONAL`, home row
+  `~3h 10m?  (provisional)` in teal. Over 24 h at that rate: `calculating`.
+- **Switch to normal**: with enough new data the first fit is **seeded** with the kept rate: `rate = kept + 0.5 ×
+  (new − kept)` (`BATTERY_ETA_SEED_ALPHA`), then the usual α = 0.25. Half weight because the 10-minute window is a
+  real measurement of the load after the wake, the kept rate a 30-minute-smoothed one of the load before; with the
+  same load nothing changes, with a different one the value is halfway after 10 minutes and follows within the window.
+  If the new window is flat or rising: `--  (no steady drain)` as usual (the kept rate becomes the smoothed one).
+- **Discarded** (no provisional value afterwards): charger (also seen during the provisional phase; after charging
+  the load is unknown), curve reload, no curve.
+- **Age cap**: the kept rate is not used when it is more than **12 hours** old, measured by the **wall clock**
+  (`osGetTime`, passed to `BatteryEta_Update` with each poll; the rate's time is that of the last window fit). The
+  wall clock because it is not known whether `svcGetSystemTick` runs during sleep (9.5). A clock set back makes the
+  age negative: also not used. Repeated wakes add up (a rate from before two 7-hour sleeps is dropped).
+- Cost: 52 more bytes in `BatteryEta` (inside the static `g_led`), no extra stack worth mentioning on the LED thread.
+
+### 17.8 Diagnostics 4/4: time-left details
+
+The top three lines of Advanced > Diagnostics 4/4 (`Time left and config.ini`, 16.16), from `BatteryEta_GetDiag`
+(pure) and `BatteryDiag_FormatEta` (pure, ≤ 49 characters for every state and the widest numbers):
+
+```
+Time left:  ~3h 10m? (provisional)
+Drain %/h:  30.0 kept, 2h old, 29.4 window
+Reset:      8m ago (wake), 8 samples/7m
+```
+
+- Line 1: the state (`~3h 10m`, `~3h 10m? (provisional)` in teal, `calculating`, `charging`, `-- (no curve)`,
+  `-- (no steady drain)`, `no reading yet`).
+- Line 2: the smoothed drain in % per hour (`30.0 smoothed`), or the kept provisional one with its wall-clock age
+  (`30.0 kept, 2h old`), or `none yet`; then the raw least-squares drain of the newest window (`29.4 window`, also
+  before the window is long enough; negative when the corrected % rises), or `no window yet`.
+- Line 3: time since the estimate last started over and why (`boot`, `charger`, `wake`, `curve`, `gap`, `no curve`;
+  on the charger / without a curve it starts over at every poll, so after unplugging this is the time since the
+  unplug), then the samples in the newest window and its span in minutes.
 
 ### 17.5 Code, host tests, safety
 
@@ -2231,15 +2362,19 @@ builds) reaches to within 2 characters of that field. There is no clean room for
 | `source/battery/battery_led.c`, `include/battery/battery_led.h` | `BatteryEta` in `g_led`, fed after each fresh poll; reset on wake / curve reload; `etaState` / `etaMinutes` in `BatteryLedStatus` |
 | `source/battery/battery_curve_sd.c`, `include/battery/battery_curve.h` | `BatteryCurve_Generation` |
 | `source/battery/battery_menu_logic.c`, `include/battery/battery_menu_logic.h` | `Time left` row (8 summary rows) |
-| `source/battery/battery_menu.c` | passes the estimate to the home screen |
+| `source/battery/battery_menu.c` | passes the estimate to the home screen; Diagnostics 4/4 (17.8) |
+| (17.7, 17.8) `battery_eta_logic.c/.h` | `BatteryEta_Restart`, provisional rate, seed, age cap, `BatteryEta_GetDiag`; `BatteryEta_Update` takes the wall clock |
 
 Host test `eta_host_test` (in `tests/battery/run_host_test.sh`): exact slope, rounding to 5 minutes, ≤ 0 and NaN
 rates, the 24 h clamp (1440 shown, 1450 not), the formats; a linear drain (calculating at 9 minutes, exact after
 10, within 5 minutes after 30 and after an hour with a full buffer at 10 s polls); a load change (follows a 5× faster
 drain); a noisy drain (±1.5 % per poll: within 15 % after 10 minutes, 10 % after 30, at most 15 minutes change
 between minutes); too little data; flat and rising; over 24 h; near empty (`<5m`); the resets (charging then
-unplug, no curve, a gap between polls, 10 s polls are no gap, explicit reset); the u32 tick wrap. `menu_host_test`
-checks every `Time left` text and the widths with the new row.
+unplug, no curve, a gap between polls, 10 s polls are no gap, explicit reset); the u32 tick wrap; since 17.7 the
+provisional estimate (wake and gap keep the rate, exact values, two wakes in a row, the seed with a changed load,
+charger / curve / no curve / charger during the provisional phase discard it, the 12 h wall-clock cap and a clock set
+back, provisional over 24 h, reset reasons and the diagnostics snapshot). `menu_host_test` checks every `Time left`
+text (also provisional) and the widths with the new row, and the three Diagnostics 4/4 lines (17.8).
 
 Safety: no new MCU or ptm write, no new SD path, nothing on NAND. `BatteryEta_Update` only does arithmetic on values
 the poll already read; the menu only reads `BatteryLed_GetStatus`.
@@ -2251,7 +2386,11 @@ the poll already read; the menu only reads `BatteryLed_GetStatus`.
    (± 10) at the same load.
 2. Plug the charger in: `charging` at once. Unplug: `calculating` after about 3 seconds (debounced unplug), an
    estimate again 10 minutes later.
-3. Close the lid (sleep) for a minute and open it: `calculating` again.
+3. With an estimate shown, close the lid (sleep) for a minute and open it: at once (within a few seconds)
+   `~Xh YYm?  (provisional)` in teal, a little less than before the sleep; Diagnostics 4/4 says `kept`, `Reset: 0m
+   ago (wake)`. About 10 minutes later the normal estimate without `?`.
+3a. Plug the charger in and out (or Restore previous curve) and then sleep / wake: `calculating`, no provisional value.
+3b. Sleep for more than 12 hours: after waking `calculating`, not provisional.
 4. Advanced > Restore previous curve (or Build curve): `calculating` again.
 5. Without a curve (rename `curve.bin`, reboot): `--  (needs a curve)`.
 6. Raise the load (full brightness, Wi-Fi) for 20 minutes: the estimate falls faster than the clock.
