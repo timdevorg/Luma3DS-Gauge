@@ -1390,10 +1390,40 @@ static bool batteryConfigEqual(const BatteryLedConfig *a, const BatteryLedConfig
            a->sleepMode == b->sleepMode && a->bars == b->bars && a->bars4Pct == b->bars4Pct && a->bars3Pct == b->bars3Pct;
 }
 
+// Settings > Y: the defaults of every config.ini setting (also Blue LED type, which has its own screen), A to take them.
+// They become an unsaved edit like any other: B saves them, SELECT undoes them. Only config.ini is ever written (by the
+// save); sessions, curve.bin / curve.bak and curve_select.ini are not touched. False if cancelled or the menu closes.
+static bool batteryConfirmDefaults(const char *title)
+{
+    static const u8 rows[] = {
+        BATTERY_SETTING_POWER_LED, BATTERY_SETTING_SLEEP_LED, BATTERY_SETTING_BARS, BATTERY_SETTING_RED,
+        BATTERY_SETTING_BLINK, BATTERY_SETTING_BARS4, BATTERY_SETTING_BARS3, BATTERY_SETTING_BLUE_MODE,
+    };
+    BatteryLedConfig def;
+    BatteryLedConfig_Defaults(&def);
+
+    batteryTextBegin();
+    batteryTextAdd(COLOR_WHITE, "Reset all settings to their defaults?");
+    batteryTextAdd(COLOR_WHITE, "");
+    for (u32 i = 0; i < sizeof(rows); i++)
+    {
+        char value[32];
+        batterySettingValue(value, rows[i], &def);
+        batteryTextAdd(COLOR_WHITE, "  %-*s %s", BATTERY_SETTING_LABEL_CHARS, batterySettingLabel(rows[i]), value);
+    }
+    batteryTextAdd(COLOR_WHITE, "");
+    batteryTextAdd(COLOR_WHITE, "Only the settings change: sessions, the curve");
+    batteryTextAdd(COLOR_WHITE, "and the session selection stay. Nothing is");
+    batteryTextAdd(COLOR_WHITE, "saved until you leave Settings with B;");
+    batteryTextAdd(COLOR_WHITE, "SELECT there undoes it.");
+    return batteryTextConfirm(title, "A: reset to defaults  B: cancel");
+}
+
 // One editor for all settings: Up/Down select a row, Left/Right change it (BatteryLedConfig_Step keeps the limits),
 // SELECT undoes every change made here, B saves (only if something changed) and goes back. Same config.ini writes and
 // LED re-evaluation as the old per-entry toggles / Thresholds screen: one BatteryLed_SetConfig on the way out.
-static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows, bool curveNote)
+// defaults: Y offers "reset to defaults" (Settings), an edit like any other (batteryConfirmDefaults).
+static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows, bool curveNote, bool defaults)
 {
     BatteryLedConfig cfg, orig;
     u32 row = 0;
@@ -1426,7 +1456,10 @@ static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows
             y = batteryMenuLine(y, COLOR_RED, "No curve yet: Power LED and bars stay stock.");
         else
             y = batteryMenuLine(y, COLOR_WHITE, "");
-        batteryMenuLine(y, COLOR_TITLE, dirty ? "Not saved yet." : "");
+        if (defaults)
+            batteryMenuLine(y, COLOR_TITLE, "%-16sY: reset to defaults", dirty ? "Not saved yet." : "");
+        else
+            batteryMenuLine(y, COLOR_TITLE, dirty ? "Not saved yet." : "");
         Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Left/Right: change  SELECT: undo  B: save, back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
@@ -1442,6 +1475,8 @@ static void batterySettingsEditor(const char *title, const u8 *rows, u32 numRows
             BatteryLedConfig_Step(&cfg, rows[row], (pressed & KEY_RIGHT) ? 1 : -1);
         else if (pressed & KEY_SELECT)
             cfg = orig;
+        else if (defaults && (pressed & KEY_Y) && batteryConfirmDefaults(title))
+            BatteryLedConfig_Defaults(&cfg); // unsaved until B, like a Left/Right change
     }
     while (!menuShouldExit);
 
@@ -1468,14 +1503,14 @@ static void batteryMenuSettings(void)
         BATTERY_SETTING_POWER_LED, BATTERY_SETTING_SLEEP_LED, BATTERY_SETTING_BARS, BATTERY_SETTING_RED,
         BATTERY_SETTING_BLINK, BATTERY_SETTING_BARS4, BATTERY_SETTING_BARS3,
     };
-    batterySettingsEditor("Battery Manager - Settings", rows, sizeof(rows), true);
+    batterySettingsEditor("Battery Manager - Settings", rows, sizeof(rows), true, true);
 }
 
 // Advanced > Blue LED type (config.ini blue_mode)
 static void batteryMenuBlueLedType(void)
 {
     static const u8 rows[] = { BATTERY_SETTING_BLUE_MODE };
-    batterySettingsEditor("Battery Manager - Blue LED type", rows, sizeof(rows), false);
+    batterySettingsEditor("Battery Manager - Blue LED type", rows, sizeof(rows), false, false);
 }
 
 // ---- Advanced ----
