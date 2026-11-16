@@ -62,6 +62,8 @@ void BatterySessions_MakePath(char *out, u32 number);
 Result BatteryFs_EnsureDirs(void);
 /// True once the SD card archive can be opened (boot readiness check).
 bool BatteryFs_SdReady(void);
+/// Deletes a file (fails if it doesn't exist). Only used for files under BATTERY_DIR.
+Result BatteryFs_Delete(const char *path);
 /// Appends len bytes at the end of the file (created if missing), flushed, then closes it.
 Result BatteryFs_Append(const char *path, const void *data, u32 len);
 /// Replaces the whole file content. A short write is an error (BATTERY_FS_RES_SHORT_WRITE).

@@ -428,6 +428,31 @@ static void curveBackupTest(const u16 *newestFirst, u32 count, const u8 *expecte
     CHECK(fileIs(BATTERY_CURVE_PATH, expected, expectedLen) && BatteryCurve_Snapshot()->numSessions == count);
     printf("  curve.bak: kept by the second build, restore swaps twice, invalid backup refused: %s\n",
            g_failures == 0 ? "OK" : "FAILED");
+
+    // R3: a bad / missing curve.bin never drops the loaded curve (the generation doesn't move either)
+    u32 gen = BatteryCurve_Generation();
+    static u8 bad[4096];
+    memcpy(bad, expected, expectedLen);
+    bad[20] ^= 0x55;
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_PATH, bad, expectedLen)));
+    CHECK(!BatteryCurve_Load() && BatteryCurve_IsLoaded() && BatteryCurve_Generation() == gen);
+    CHECK(BatteryCurve_Snapshot() != NULL && BatteryCurve_Snapshot()->numSessions == count);
+    CHECK(BatteryCurve_Corrected(50.0f, 0.0f) >= 0.0f);
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_PATH, expected, 100))); // truncated
+    CHECK(!BatteryCurve_Load() && BatteryCurve_IsLoaded() && BatteryCurve_Snapshot()->numSessions == count);
+    CHECK(R_SUCCEEDED(BatteryFs_Delete(BATTERY_CURVE_PATH)));                    // missing (and no tmp)
+    CHECK(!BatteryCurve_Load() && BatteryCurve_IsLoaded() && BatteryCurve_Snapshot()->numSessions == count);
+    CHECK(BatteryCurve_LoadAtBoot() && BatteryCurve_Generation() == gen); // already loaded: nothing read
+    // curve.bin missing, valid curve.tmp (power cut between the renames): loaded from the tmp, tmp kept
+    single[10] ^= 0xFF; // undo the corruption above: single is the valid one-session curve again
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_TMP_PATH, single, singleLen)));
+    CHECK(BatteryCurve_Load() && BatteryCurve_Snapshot()->numSessions == 1 && BatteryCurve_Generation() == gen + 1);
+    CHECK(fileExists(BATTERY_CURVE_TMP_PATH));
+    // F4: a good curve.bin next to a stale curve.tmp: the bin is loaded, the tmp deleted
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_PATH, expected, expectedLen)));
+    CHECK(BatteryCurve_Load() && BatteryCurve_Snapshot()->numSessions == count && !fileExists(BATTERY_CURVE_TMP_PATH));
+    printf("  curve load: bad / short / missing curve.bin keeps the loaded curve, tmp fallback, stale tmp deleted: %s\n",
+           g_failures == 0 ? "OK" : "FAILED");
 }
 
 int main(int argc, char **argv)

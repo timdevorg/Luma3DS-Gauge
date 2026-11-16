@@ -68,6 +68,17 @@ static bool batteryFsExists(const char *path)
     return true;
 }
 
+Result BatteryFs_Delete(const char *path)
+{
+    FS_Archive archive;
+    Result res = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
+    if (R_FAILED(res))
+        return res;
+    res = FSUSER_DeleteFile(archive, batteryPath(path));
+    FSUSER_CloseArchive(archive);
+    return res;
+}
+
 Result BatteryFs_Append(const char *path, const void *data, u32 len)
 {
     IFile file;

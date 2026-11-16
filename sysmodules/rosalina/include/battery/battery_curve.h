@@ -147,12 +147,15 @@ float BatteryCurve_CorrectedFrom(const BatteryCurveFile *f, float pct, float vol
 // ---- SD / loaded curve (battery_curve_sd.c) ----
 
 void BatteryCurve_Init(void);
-/// (Re)loads curve.bin (or curve.tmp if a power cut hit the rename). Returns true if a valid curve is loaded.
+/// (Re)loads curve.bin (or curve.tmp if a power cut hit the rename; a curve.tmp next to a good curve.bin is deleted).
+/// Returns true if a new valid curve was loaded; otherwise the curve loaded before (if any) stays. Menu thread only.
 bool BatteryCurve_Load(void);
+/// Boot load (LED thread): like BatteryCurve_Load, but does nothing if a curve is already loaded.
+bool BatteryCurve_LoadAtBoot(void);
 bool BatteryCurve_IsLoaded(void);
 /// Highest session number in the loaded curve, 0 without a curve. Thread-safe.
 u32 BatteryCurve_MaxSessionNumber(void);
-/// Counts BatteryCurve_Load calls (boot, build, restore): the time-remaining estimate starts over when it changes.
+/// Counts successful curve loads (boot, build, restore): the time-remaining estimate starts over when it changes.
 u32 BatteryCurve_Generation(void);
 /// Copies the loaded curve into a static buffer shared with BatteryCurve_Build (saves RAM) and
 /// returns it, or NULL if no curve is loaded. Menu thread only; valid until the next call / build.

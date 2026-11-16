@@ -497,8 +497,12 @@ void BatteryLed_EnsureConfigLoaded(void)
     {
         BatteryLedConfig cfg;
         BatteryLedConfig_Defaults(&cfg);
-        // config.ini, or config.tmp if a power cut hit between delete and rename
-        if (!batteryLedReadConfigFileLocked(BATTERY_CONFIG_PATH, &cfg))
+        // config.ini, or config.tmp if a power cut hit between delete and rename. After a good config.ini a
+        // leftover config.tmp (interrupted save) is deleted, so it can't come back if config.ini is deleted later
+        // (F4; SetConfig's safe write is under the same g_cfgFileLock, so this can't hit one in progress)
+        if (batteryLedReadConfigFileLocked(BATTERY_CONFIG_PATH, &cfg))
+            BatteryFs_Delete(BATTERY_CONFIG_TMP_PATH);
+        else
         {
             BatteryLedConfig_Defaults(&cfg);
             if (!batteryLedReadConfigFileLocked(BATTERY_CONFIG_TMP_PATH, &cfg))
@@ -723,7 +727,7 @@ static void batteryLedThreadMain(void)
     g_led.sdReadyMs = batteryLedNowMs();
     LightLock_Unlock(&g_led.lock);
 
-    BatteryCurve_Load(); // for the LED, the Status screen and the recorder
+    BatteryCurve_LoadAtBoot(); // for the LED, the Status screen and the recorder
     BatteryLed_EnsureConfigLoaded();
 
     Handle handles[2] = { preTerminationEvent, g_ledKick };

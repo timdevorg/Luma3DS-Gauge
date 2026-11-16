@@ -8,7 +8,8 @@
 *   curve.bin is written as curve.tmp first, then the old curve.bin is renamed to curve.bak (the previous
 *   curve, for Advanced > Restore previous curve) and curve.tmp to curve.bin. A power cut can at worst
 *   leave curve.tmp next to (or instead of) curve.bin; the loader validates the checksum and falls back
-*   to curve.tmp.
+*   to curve.tmp, deletes a curve.tmp left next to a good curve.bin, and never replaces a loaded curve with
+*   one that doesn't validate.
 */
 
 #include <3ds.h>
@@ -19,31 +20,67 @@
 #include "battery/battery_curve.h"
 
 static LightLock g_curveLock;
+static LightLock g_curveLoadLock; // serializes loads and the curve safe writes (see batteryCurveLoadLocked)
 static BatteryCurveFile g_curve; // protected by g_curveLock
 static bool g_curveLoaded;
-static u32 g_curveGeneration; // BatteryCurve_Load calls (BatteryCurve_Generation)
+static u32 g_curveGeneration; // successful loads (BatteryCurve_Generation)
+static BatteryCurveFile g_buildFile; // also the menu's snapshot of the loaded curve, and the reload scratch buffer
 
 void BatteryCurve_Init(void)
 {
     LightLock_Init(&g_curveLock);
+    LightLock_Init(&g_curveLoadLock);
 }
 
-// Reads path into g_curve and validates it. g_curveLock must be held.
-static bool batteryCurveLoadFileLocked(const char *path)
+// Reads path into *dst and validates it (no lock: dst isn't the live curve, or no curve is loaded)
+static bool batteryCurveReadValid(const char *path, BatteryCurveFile *dst)
 {
     u32 len = 0;
-    if (R_FAILED(BatteryFs_ReadHead(path, &g_curve, sizeof(g_curve), &len)) || len != sizeof(g_curve))
+    if (R_FAILED(BatteryFs_ReadHead(path, dst, sizeof(*dst), &len)) || len != sizeof(*dst))
         return false;
-    return BatteryCurve_FileIsValid(&g_curve);
+    return BatteryCurve_FileIsValid(dst);
+}
+
+// curve.bin, else curve.tmp (a power cut between the renames). g_curveLoadLock must be held.
+// The live curve is only replaced by a file that validates (R3): an SD error or a bad file keeps the curve that is
+// loaded. The file is read outside g_curveLock (SD reads can be slow; the LED thread takes g_curveLock under
+// g_led.lock). Scratch buffer, no extra RAM: with no curve loaded nobody reads g_curve, so it is read in place;
+// with a curve loaded the caller is the menu thread (BatteryCurve_Load, Build, Restore) and g_buildFile, which
+// only the menu thread uses, is the scratch (the boot load, on the LED thread, uses BatteryCurve_LoadAtBoot,
+// which does nothing once a curve is loaded).
+// After a good curve.bin, a leftover curve.tmp is deleted (F4): it can only come from an interrupted build and
+// would otherwise come back if curve.bin is deleted later. No build can be between its writes now (same lock).
+static bool batteryCurveLoadLocked(void)
+{
+    BatteryCurveFile *scratch = BatteryCurve_IsLoaded() ? &g_buildFile : &g_curve;
+    bool fromBin = batteryCurveReadValid(BATTERY_CURVE_PATH, scratch);
+    if (!fromBin && !batteryCurveReadValid(BATTERY_CURVE_TMP_PATH, scratch))
+        return false;
+    if (fromBin)
+        BatteryFs_Delete(BATTERY_CURVE_TMP_PATH); // usually not there
+
+    LightLock_Lock(&g_curveLock);
+    if (scratch != &g_curve)
+        memcpy(&g_curve, scratch, sizeof(g_curve));
+    g_curveLoaded = true;
+    g_curveGeneration++;
+    LightLock_Unlock(&g_curveLock);
+    return true;
 }
 
 bool BatteryCurve_Load(void)
 {
-    LightLock_Lock(&g_curveLock);
-    g_curveLoaded = batteryCurveLoadFileLocked(BATTERY_CURVE_PATH) || batteryCurveLoadFileLocked(BATTERY_CURVE_TMP_PATH);
-    g_curveGeneration++;
-    bool loaded = g_curveLoaded;
-    LightLock_Unlock(&g_curveLock);
+    LightLock_Lock(&g_curveLoadLock);
+    bool loaded = batteryCurveLoadLocked();
+    LightLock_Unlock(&g_curveLoadLock);
+    return loaded;
+}
+
+bool BatteryCurve_LoadAtBoot(void)
+{
+    LightLock_Lock(&g_curveLoadLock);
+    bool loaded = BatteryCurve_IsLoaded() || batteryCurveLoadLocked(); // the menu was faster: nothing to do
+    LightLock_Unlock(&g_curveLoadLock);
     return loaded;
 }
 
@@ -88,7 +125,6 @@ float BatteryCurve_Corrected(float pct, float voltRaw)
 
 static BatteryCurveSession g_buildSession;
 static BatteryCurveAccum g_buildAccum;
-static BatteryCurveFile g_buildFile; // also the menu's snapshot of the loaded curve
 static u8 g_buildChunk[1024];
 
 const BatteryCurveFile *BatteryCurve_Snapshot(void)
@@ -229,12 +265,14 @@ bool BatteryCurve_Build(const u16 *unsortedNumbers, u32 count, BatteryCurveProgr
 
     BatteryCurve_FileFinalize(&g_buildFile);
 
-    // curve.tmp -> curve.bin renamed to curve.bak -> curve.tmp renamed to curve.bin
+    // curve.tmp -> curve.bin renamed to curve.bak -> curve.tmp renamed to curve.bin, then reloaded (one g_curveLoadLock
+    // section: a load can't delete curve.tmp between the writes)
+    LightLock_Lock(&g_curveLoadLock);
     out->res = BatteryFs_WriteSafelyKeepOld(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, BATTERY_CURVE_BAK_PATH,
                                             &g_buildFile, sizeof(g_buildFile));
-    if (R_FAILED(out->res))
-        return false;
-    return BatteryCurve_Load();
+    bool loaded = R_SUCCEEDED(out->res) && batteryCurveLoadLocked();
+    LightLock_Unlock(&g_curveLoadLock);
+    return loaded;
 }
 
 // ---- Previous curve (curve.bak) ----
@@ -242,10 +280,7 @@ bool BatteryCurve_Build(const u16 *unsortedNumbers, u32 count, BatteryCurveProgr
 // Reads curve.bak into g_buildFile and validates it
 static bool batteryCurveReadBackup(void)
 {
-    u32 len = 0;
-    if (R_FAILED(BatteryFs_ReadHead(BATTERY_CURVE_BAK_PATH, &g_buildFile, sizeof(g_buildFile), &len)) || len != sizeof(g_buildFile))
-        return false;
-    return BatteryCurve_FileIsValid(&g_buildFile);
+    return batteryCurveReadValid(BATTERY_CURVE_BAK_PATH, &g_buildFile);
 }
 
 bool BatteryCurve_BackupInfo(u16 *outNumSessions, u16 *outSessions)
@@ -266,11 +301,13 @@ u8 BatteryCurve_RestoreBackup(Result *outRes)
         return BATTERY_CURVE_RESTORE_NO_BACKUP;
 
     // Same sequence as a build: curve.tmp, current curve.bin -> curve.bak, curve.tmp -> curve.bin
+    LightLock_Lock(&g_curveLoadLock);
     *outRes = BatteryFs_WriteSafelyKeepOld(BATTERY_CURVE_PATH, BATTERY_CURVE_TMP_PATH, BATTERY_CURVE_BAK_PATH,
                                            &g_buildFile, sizeof(g_buildFile));
-    if (R_FAILED(*outRes))
-        return BATTERY_CURVE_RESTORE_SD_ERROR;
-    return BatteryCurve_Load() ? BATTERY_CURVE_RESTORE_OK : BATTERY_CURVE_RESTORE_LOAD_FAILED;
+    u8 r = R_FAILED(*outRes) ? BATTERY_CURVE_RESTORE_SD_ERROR :
+           batteryCurveLoadLocked() ? BATTERY_CURVE_RESTORE_OK : BATTERY_CURVE_RESTORE_LOAD_FAILED;
+    LightLock_Unlock(&g_curveLoadLock);
+    return r;
 }
 
 // ---- Session selection (curve_select.ini) ----
