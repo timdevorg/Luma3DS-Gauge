@@ -373,7 +373,8 @@ static u32 batteryDiagPtm(u32 y, const BatteryDiagData *d)
     if (ptm->state == BATTERY_PTM_STATE_OK)
         y = batteryMenuLine(y, COLOR_WHITE, "  sleep %02lx wake %02lx (%s), writes %lu", (u32)ptm->sleepCur, (u32)ptm->wakeCur,
                             ptmName, ptm->writes);
-    else if (ptm->state == BATTERY_PTM_STATE_NO_PTM || ptm->state == BATTERY_PTM_STATE_MAP_ERROR)
+    else if (ptm->state == BATTERY_PTM_STATE_NO_PTM || ptm->state == BATTERY_PTM_STATE_MAP_ERROR ||
+             ptm->state == BATTERY_PTM_STATE_OFF_UNMAP)
         y = batteryMenuLine(y, COLOR_RED, "  %s 0x%08lx", ptmName, (u32)ptm->lastRes);
     else if (ptm->state == BATTERY_PTM_STATE_OFF_TITLE)
         y = batteryMenuLine(y, COLOR_RED, "  off: title id %08lx%08lx", (u32)(ptm->titleId >> 32), (u32)ptm->titleId);
@@ -404,7 +405,8 @@ static u32 batteryDiagPtm(u32 y, const BatteryDiagData *d)
                             bars->writes);
     else if (bars->state == BATTERY_BARS_STATE_UNCHECKED)
         y = batteryMenuLine(y, COLOR_WHITE, "  not checked yet, shared %lu", shared);
-    else if (bars->state == BATTERY_BARS_STATE_NO_PTM || bars->state == BATTERY_BARS_STATE_MAP_ERROR)
+    else if (bars->state == BATTERY_BARS_STATE_NO_PTM || bars->state == BATTERY_BARS_STATE_MAP_ERROR ||
+             bars->state == BATTERY_BARS_STATE_OFF_UNMAP)
         y = batteryMenuLine(y, COLOR_RED, "  %s 0x%08lx", BatteryBars_StateName(bars->state), (u32)bars->lastRes);
     else if (bars->state == BATTERY_BARS_STATE_OFF_TITLE)
         y = batteryMenuLine(y, COLOR_RED, "  off: title id %08lx%08lx", (u32)(bars->titleId >> 32), (u32)bars->titleId);

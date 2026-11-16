@@ -25,6 +25,7 @@
 #include <3ds.h>
 #include "csvc.h"
 #include "process_patches.h"
+#include "utils.h" // isN3DS
 #include "battery/battery_ptm_patch.h"
 #include "battery/battery_ptm_bars.h"
 
@@ -57,7 +58,7 @@ void BatteryPtmPatch_Init(void)
 static bool batteryPtmIsOff(u8 state)
 {
     return state == BATTERY_PTM_STATE_OFF_TITLE || state == BATTERY_PTM_STATE_OFF_LAYOUT ||
-           state == BATTERY_PTM_STATE_OFF_MISMATCH;
+           state == BATTERY_PTM_STATE_OFF_MISMATCH || state == BATTERY_PTM_STATE_OFF_UNMAP;
 }
 
 static void batteryPtmRead(volatile const u8 *p, u8 *out)
@@ -73,14 +74,14 @@ typedef enum BatteryPtmProcessCheck
     BATTERY_PTM_PROCESS_LAYOUT,     // .text not at 0x00100000, or too small to hold codeEndVa
 } BatteryPtmProcessCheck;
 
-// Title ID (with or without the N3DS bit; the O3DS ptm fails the code checks) and layout (.text starts at
-// 0x00100000 and covers everything up to codeEndVa). Shared by both patches.
+// Title ID (the N3DS ptm; without the N3DS bit only on a New 3DS, S1) and layout (.text starts at 0x00100000 and
+// covers everything up to codeEndVa). Shared by both patches.
 static u8 batteryPtmCheckProcess(Handle h, u32 codeEndVa, u64 *titleId)
 {
     s64 tid = 0;
     Result tidRes = svcGetProcessInfo(&tid, h, 0x10001);
     *titleId = (u64)tid;
-    if (R_FAILED(tidRes) || ((u64)tid != BATTERY_PTM_TITLE_ID && (u64)tid != BATTERY_PTM_TITLE_ID_BASE))
+    if (R_FAILED(tidRes) || !BatteryPtmPatch_TitleAllowed((u64)tid, isN3DS))
         return BATTERY_PTM_PROCESS_TITLE;
 
     s64 textStart = 0, textSize = 0;
@@ -105,7 +106,7 @@ static u8 batteryPtmVerifyBoth(const u8 *sleepBuf, const u8 *wakeBuf)
 // Verifies and (if needed) writes, with ptm's process handle open. g_ptm.lock held.
 static void batteryPtmApplyToProcessLocked(Handle h, u8 sleepByte, u8 wakeByte)
 {
-    // 1. Title ID (with or without the N3DS bit; the O3DS ptm fails the code checks below)
+    // 1. Title ID (N3DS ptm only, BatteryPtmPatch_TitleAllowed)
     // 2. Layout: .text starts at 0x00100000 and covers both patterns
     u8 check = batteryPtmCheckProcess(h, BATTERY_PTM_CODE_END_VA, &g_ptm.st.titleId);
     if (check != BATTERY_PTM_PROCESS_OK)
@@ -178,8 +179,16 @@ static void batteryPtmApplyToProcessLocked(Handle h, u8 sleepByte, u8 wakeByte)
             g_ptm.st.state = BATTERY_PTM_STATE_WRITE_ERROR;
     }
 
-    // The kernel invalidates the instruction cache and flushes the data cache again on unmap
-    svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_PTM_MAP_ADDR, BATTERY_PTM_PAGE_SIZE);
+    // The kernel invalidates the instruction cache and flushes the data cache again on unmap.
+    // R4: if the unmap fails, an RW alias of ptm's code would stay mapped at BATTERY_PTM_MAP_ADDR. Nothing writes
+    // through it outside this function (ps / pw are locals), and OFF_UNMAP is an "off" state: Apply never maps or
+    // writes again this boot.
+    res = svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_PTM_MAP_ADDR, BATTERY_PTM_PAGE_SIZE);
+    if (R_FAILED(res))
+    {
+        g_ptm.st.state = BATTERY_PTM_STATE_OFF_UNMAP;
+        g_ptm.st.lastRes = res;
+    }
 }
 
 void BatteryPtmPatch_Apply(u8 sleepByte, u8 wakeByte)
@@ -240,7 +249,7 @@ void BatteryBars_Init(void)
 static bool batteryBarsIsOff(u8 state)
 {
     return state == BATTERY_BARS_STATE_OFF_TITLE || state == BATTERY_BARS_STATE_OFF_LAYOUT ||
-           state == BATTERY_BARS_STATE_OFF_MISMATCH;
+           state == BATTERY_BARS_STATE_OFF_MISMATCH || state == BATTERY_BARS_STATE_OFF_UNMAP;
 }
 
 bool BatteryBars_Retryable(u8 state)
@@ -362,8 +371,14 @@ static void batteryBarsApplyToProcessLocked(Handle h, u8 cmp, u8 movs)
             g_bars.st.state = BATTERY_BARS_STATE_WRITE_ERROR;
     }
 
-    // The kernel invalidates the instruction cache and flushes the data cache again on unmap
-    svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_BARS_MAP_ADDR, BATTERY_BARS_MAP_SIZE);
+    // The kernel invalidates the instruction cache and flushes the data cache again on unmap. R4: on failure the
+    // bars patch is off for this boot (never mapped or written again; pa / pb are locals), as for the sleep patch.
+    res = svcUnmapProcessMemoryEx(CUR_PROCESS_HANDLE, BATTERY_BARS_MAP_ADDR, BATTERY_BARS_MAP_SIZE);
+    if (R_FAILED(res))
+    {
+        g_bars.st.state = BATTERY_BARS_STATE_OFF_UNMAP;
+        g_bars.st.lastRes = res;
+    }
 }
 
 void BatteryBars_Apply(u8 level)

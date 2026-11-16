@@ -292,6 +292,13 @@ static void testVerify(void)
     CHECK(strcmp(BatteryPtmPatch_StateName(BATTERY_PTM_STATE_OK, 0x05, 0x05), "active") == 0);
     CHECK(strcmp(BatteryPtmPatch_StateName(BATTERY_PTM_STATE_OK, 0x02, 0x04), "active") == 0);
     CHECK(strcmp(BatteryPtmPatch_StateName(BATTERY_PTM_STATE_OFF_MISMATCH, 0x02, 0x00), "off: mismatch") == 0);
+    CHECK(strcmp(BatteryPtmPatch_StateName(BATTERY_PTM_STATE_OFF_UNMAP, 0x02, 0x00), "off: unmap error") == 0);
+    // S1: the N3DS ptm only; its running codeset ID without the N3DS bit only on a New 3DS
+    CHECK(BatteryPtmPatch_TitleAllowed(0x0004013020002202ULL, true));
+    CHECK(BatteryPtmPatch_TitleAllowed(0x0004013000002202ULL, true));
+    CHECK(!BatteryPtmPatch_TitleAllowed(0x0004013000002202ULL, false));
+    CHECK(!BatteryPtmPatch_TitleAllowed(0x0004013000002102ULL, true));
+    CHECK(!BatteryPtmPatch_TitleAllowed(0, true));
 }
 
 static u32 countHits(const u8 *data, long size, VerifyFn verify, u32 *lastOff)

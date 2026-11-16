@@ -34,6 +34,11 @@ static const u8 g_ptmWakePattern[BATTERY_PTM_PATTERN_LEN] = {
     0x1C, 0x48, BATTERY_PTM_WAKE_STOCK, 0x21, 0x00, 0xF0, 0x26, 0xFD,
 };
 
+bool BatteryPtmPatch_TitleAllowed(u64 titleId, bool n3ds)
+{
+    return titleId == BATTERY_PTM_TITLE_ID || (n3ds && titleId == BATTERY_PTM_TITLE_ID_BASE);
+}
+
 bool BatteryPtmPatch_SleepByteAllowed(u8 b)
 {
     return b == BATTERY_LED_MODE_BLUE_FORCED || b == BATTERY_PTM_SLEEP_STOCK || b == BATTERY_LED_MODE_RED ||
@@ -122,6 +127,7 @@ const char *BatteryPtmPatch_StateName(u8 state, u8 sleepCur, u8 wakeCur)
         case BATTERY_PTM_STATE_OFF_TITLE:       return "off: title id";
         case BATTERY_PTM_STATE_OFF_LAYOUT:      return "off: layout";
         case BATTERY_PTM_STATE_OFF_MISMATCH:    return "off: mismatch";
+        case BATTERY_PTM_STATE_OFF_UNMAP:       return "off: unmap error";
         default:                                return "?";
     }
 }

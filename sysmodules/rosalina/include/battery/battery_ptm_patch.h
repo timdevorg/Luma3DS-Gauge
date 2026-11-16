@@ -42,8 +42,9 @@
 
 #define BATTERY_PTM_PROCESS_NAME        "ptm"
 #define BATTERY_PTM_TITLE_ID            0x0004013020002202ULL   // New 3DS ptm (title folder on NAND)
-// The running process's codeset may carry the ID without the N3DS bit (0x20000000): accept both.
-// The 16-byte code checks are what really identify the binary; the O3DS ptm fails them.
+// The running process's codeset carries the ID without the N3DS bit (0x20000000): that one is accepted only on a
+// New 3DS (S1, BatteryPtmPatch_TitleAllowed), so the O3DS ptm is refused by its title ID already, not only by the
+// 16-byte code checks (which are what really identify the binary).
 #define BATTERY_PTM_TITLE_ID_BASE       0x0004013000002202ULL
 #define BATTERY_PTM_CODE_BASE           0x00100000u             // ptm's .text start (svcGetProcessInfo 0x10005)
 #define BATTERY_PTM_PATTERN_LEN         16
@@ -78,6 +79,7 @@ typedef enum BatteryPtmPatchState
     BATTERY_PTM_STATE_OFF_TITLE,        // "ptm" has another title ID: off for this boot
     BATTERY_PTM_STATE_OFF_LAYOUT,       // code not at 0x00100000 or .text too small: off for this boot
     BATTERY_PTM_STATE_OFF_MISMATCH,     // a 16-byte pattern doesn't match (other firmware version): off for this boot
+    BATTERY_PTM_STATE_OFF_UNMAP,        // unmapping the page failed (lastRes): off for this boot, never mapped again
 } BatteryPtmPatchState;
 
 #define BATTERY_PTM_MISMATCH_SLEEP      0x01    // BatteryPtmPatchStatus.mismatch bits (OFF_MISMATCH)
@@ -101,6 +103,8 @@ typedef struct BatteryPtmPatchStatus
 
 /// Sleep byte whitelist: 0x01 (forced blue), 0x02 (stock), 0x04 (red on / blue off), 0x05 (blue on / red off).
 bool BatteryPtmPatch_SleepByteAllowed(u8 b);
+/// ptm title ID check: BATTERY_PTM_TITLE_ID, or BATTERY_PTM_TITLE_ID_BASE only on a New 3DS (isN3DS).
+bool BatteryPtmPatch_TitleAllowed(u64 titleId, bool n3ds);
 /// Wake byte whitelist: 0x00 (stock, automatic), 0x01, 0x04, 0x05.
 bool BatteryPtmPatch_WakeByteAllowed(u8 b);
 

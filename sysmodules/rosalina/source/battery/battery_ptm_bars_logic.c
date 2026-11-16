@@ -197,6 +197,7 @@ const char *BatteryBars_StateName(u8 state)
         case BATTERY_BARS_STATE_OFF_TITLE:      return "off: title id";
         case BATTERY_BARS_STATE_OFF_LAYOUT:     return "off: layout";
         case BATTERY_BARS_STATE_OFF_MISMATCH:   return "off: mismatch";
+        case BATTERY_BARS_STATE_OFF_UNMAP:      return "off: unmap error";
         default:                                return "?";
     }
 }

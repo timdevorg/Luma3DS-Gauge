@@ -116,6 +116,7 @@ typedef enum BatteryBarsState
     BATTERY_BARS_STATE_OFF_TITLE,       // "ptm" has another title ID: off for this boot
     BATTERY_BARS_STATE_OFF_LAYOUT,      // code not at 0x00100000 or .text too small: off for this boot
     BATTERY_BARS_STATE_OFF_MISMATCH,    // a 16-byte window doesn't match: off for this boot
+    BATTERY_BARS_STATE_OFF_UNMAP,       // unmapping failed (lastRes): off for this boot, never mapped again
 } BatteryBarsState;
 
 #define BATTERY_BARS_MISMATCH_A         0x01    // BatteryBarsStatus.mismatch bits (OFF_MISMATCH)
