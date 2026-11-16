@@ -63,6 +63,17 @@ bool BatteryCurve_IsLoaded(void)
     return loaded;
 }
 
+u32 BatteryCurve_MaxSessionNumber(void)
+{
+    u32 max = 0;
+    LightLock_Lock(&g_curveLock);
+    for (u32 k = 0; g_curveLoaded && k < g_curve.numSessions && k < BATTERY_CURVE_MAX_SESSIONS; k++)
+        if (g_curve.sessions[k] > max)
+            max = g_curve.sessions[k];
+    LightLock_Unlock(&g_curveLock);
+    return max;
+}
+
 float BatteryCurve_Corrected(float pct, float voltRaw)
 {
     float c = -1.0f;
@@ -326,6 +337,20 @@ void BatteryCurve_SelectionSet(u32 number, bool selected)
     g_sel.numbers[g_sel.count] = (u16)number;
     g_sel.selected[g_sel.count] = selected;
     g_sel.count++;
+}
+
+Result BatteryCurve_SelectionForget(u32 number)
+{
+    BatteryCurve_SelectionLoad();
+    for (u32 i = 0; i < g_sel.count; i++)
+        if (g_sel.numbers[i] == number)
+        {
+            memmove(g_sel.numbers + i, g_sel.numbers + i + 1, (g_sel.count - i - 1) * sizeof(g_sel.numbers[0]));
+            memmove(g_sel.selected + i, g_sel.selected + i + 1, (g_sel.count - i - 1) * sizeof(g_sel.selected[0]));
+            g_sel.count--;
+            return BatteryCurve_SelectionSave();
+        }
+    return 0; // not listed: nothing to write
 }
 
 Result BatteryCurve_SelectionSave(void)

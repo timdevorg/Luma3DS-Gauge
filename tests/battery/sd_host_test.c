@@ -316,6 +316,76 @@ static void keepOldAndStartCheckTest(void)
     printf("keep-old safe write and start check: %s\n", g_failures == 0 ? "OK" : "FAILED");
 }
 
+// F1 / F15: session numbers are never reused (last_session counter), legacy SDs without it, a deleted session's
+// curve_select.ini entry is removed, a directory read error is an error (not "no free number"). Own SD root.
+static void sessionNumberTest(void)
+{
+    const char *saved = g_root;
+    char root[1024], luma[1024];
+    static char rootBuf[1024];
+    u32 n = 99;
+    snprintf(root, sizeof(root), "%s/numbering", saved);
+    snprintf(luma, sizeof(luma), "%s/luma", root);
+    mkdir(root, 0755);
+    mkdir(luma, 0755);
+    snprintf(rootBuf, sizeof(rootBuf), "%s", root);
+    g_root = rootBuf;
+    CHECK(R_SUCCEEDED(BatteryFs_EnsureDirs()));
+
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 1);
+    for (u32 i = 1; i <= 2; i++)
+    {
+        char path[40];
+        BatterySessions_MakePath(path, i);
+        CHECK(R_SUCCEEDED(BatterySessions_ReserveNumber(i)));
+        CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(path, "# x\n", 4)));
+    }
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 3);
+    CHECK(fileIs(BATTERY_LAST_SESSION_PATH, "last=0002\n", 10) && !fileExists(BATTERY_LAST_SESSION_TMP_PATH));
+
+    // Delete the newest: its number doesn't come back
+    CHECK(R_SUCCEEDED(BatterySessions_Delete(2)));
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 3);
+
+    // Legacy SD (no counter file): max existing + 1, or past the loaded curve's sessions
+    char counter[1024];
+    snprintf(counter, sizeof(counter), "%s%s", root, BATTERY_LAST_SESSION_PATH);
+    remove(counter);
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 2);
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(2, &n)) && n == 3);
+    // Power cut during the counter's safe write: the tmp counts too
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_LAST_SESSION_TMP_PATH, "last=0007\n", 10)));
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 8);
+    // Garbage counter is ignored
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_LAST_SESSION_TMP_PATH, "junk", 4)));
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 2);
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_LAST_SESSION_PATH, "last=9999\n", 10)));
+    CHECK(R_SUCCEEDED(BatterySessions_NextNumber(0, &n)) && n == 0); // none left
+
+    // curve_select.ini: the deleted session's entry is removed, the others stay; unlisted: nothing written
+    static const char sel[] = "# c\n0001=1\n0002=0\n0003=1\n";
+    CHECK(R_SUCCEEDED(BatteryFs_WriteWhole(BATTERY_CURVE_SELECT_PATH, sel, sizeof(sel) - 1)));
+    CHECK(R_SUCCEEDED(BatteryCurve_SelectionForget(2)));
+    BatteryCurve_SelectionLoad();
+    CHECK(BatteryCurve_SelectionGet(2) == -1 && BatteryCurve_SelectionGet(1) == 1 && BatteryCurve_SelectionGet(3) == 1);
+    CHECK(R_SUCCEEDED(BatteryCurve_SelectionForget(5)));
+    BatteryCurve_SelectionLoad();
+    CHECK(BatteryCurve_SelectionGet(1) == 1 && BatteryCurve_SelectionGet(3) == 1);
+
+    // Sessions directory unreadable: an error, not "no free number"
+    char sessions[1024], s1[1024];
+    snprintf(sessions, sizeof(sessions), "%s%s", root, BATTERY_SESSIONS_DIR);
+    snprintf(s1, sizeof(s1), "%s/0001.csv", sessions);
+    remove(s1);
+    rmdir(sessions);
+    n = 99;
+    CHECK(R_FAILED(BatterySessions_NextNumber(0, &n)) && n == 0);
+
+    g_root = saved;
+    printf("session numbers: never reused after delete, legacy SD, tmp counter, selection cleanup, dir error: %s\n",
+           g_failures == 0 ? "OK" : "FAILED");
+}
+
 // curve.bak: built after the first build, restore swaps (needs the full curve in expected / count sessions)
 static void curveBackupTest(const u16 *newestFirst, u32 count, const u8 *expected, size_t expectedLen)
 {
@@ -373,6 +443,7 @@ int main(int argc, char **argv)
         CHECK(R_SUCCEEDED(BatteryFs_EnsureDirs()));
         safeWriteTest();
         keepOldAndStartCheckTest();
+        sessionNumberTest();
         printf("sessions / curve build: SKIPPED (no session CSVs)\n");
         printf("%s\n", g_failures == 0 ? "sd host test: OK (safe write, keep-old and start check only)" : "sd host test: FAILED");
         return g_failures == 0 ? 0 : 1;
@@ -437,7 +508,10 @@ int main(int argc, char **argv)
         curveBackupTest(newestFirst, count, expected, expectedLen);
         safeWriteTest();
         if (r == 0)
+        {
             keepOldAndStartCheckTest();
+            sessionNumberTest();
+        }
     }
 
     bool sameInfo = true;

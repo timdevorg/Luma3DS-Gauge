@@ -772,6 +772,9 @@ static bool batterySessionDelete(const BatterySessionInfo *info, bool inCurve, c
         batteryMenuMessage(title, "Delete failed.", line);
         return false;
     }
+    // Its curve_select.ini entry goes too. The number is never reused (last_session), so a failure here only leaves
+    // a harmless stale line
+    BatteryCurve_SelectionForget(info->number);
     return true;
 }
 

@@ -25,6 +25,7 @@ typedef enum BatteryRecorderError
     BATTERY_REC_SD_FAILED,
     BATTERY_REC_NO_FREE_NUMBER,
     BATTERY_REC_SHUTTING_DOWN,
+    BATTERY_REC_SD_READ_FAILED,     // the sessions directory can't be read (no number can be chosen)
 } BatteryRecorderError;
 
 typedef struct BatteryRecorderStatus

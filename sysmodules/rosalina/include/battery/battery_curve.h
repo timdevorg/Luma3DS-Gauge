@@ -150,6 +150,8 @@ void BatteryCurve_Init(void);
 /// (Re)loads curve.bin (or curve.tmp if a power cut hit the rename). Returns true if a valid curve is loaded.
 bool BatteryCurve_Load(void);
 bool BatteryCurve_IsLoaded(void);
+/// Highest session number in the loaded curve, 0 without a curve. Thread-safe.
+u32 BatteryCurve_MaxSessionNumber(void);
 /// Counts BatteryCurve_Load calls (boot, build, restore): the time-remaining estimate starts over when it changes.
 u32 BatteryCurve_Generation(void);
 /// Copies the loaded curve into a static buffer shared with BatteryCurve_Build (saves RAM) and
@@ -196,3 +198,5 @@ void BatteryCurve_SelectionLoad(void);
 s32 BatteryCurve_SelectionGet(u32 number);
 void BatteryCurve_SelectionSet(u32 number, bool selected);
 Result BatteryCurve_SelectionSave(void);
+/// Removes a (deleted) session's entry from curve_select.ini (loads it first; writes only if it was listed).
+Result BatteryCurve_SelectionForget(u32 number);

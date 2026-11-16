@@ -284,10 +284,24 @@ BatteryRecorderError BatteryRecorder_Start(u16 *outNumber, Result *outRes)
         goto end;
     }
 
-    u32 number = BatterySessions_NextNumber();
+    u32 number = 0;
+    res = BatterySessions_NextNumber(BatteryCurve_MaxSessionNumber(), &number);
+    if (R_FAILED(res))
+    {
+        err = BATTERY_REC_SD_READ_FAILED; // not "no free number" (F15)
+        goto end;
+    }
     if (number == 0)
     {
         err = BATTERY_REC_NO_FREE_NUMBER;
+        goto end;
+    }
+    // Before the CSV exists: once a number is reserved it is never handed out again, even if this start fails
+    // or the session is deleted later
+    res = BatterySessions_ReserveNumber(number);
+    if (R_FAILED(res))
+    {
+        err = BATTERY_REC_SD_FAILED;
         goto end;
     }
 
@@ -382,6 +396,7 @@ const char *BatteryRecorder_ErrorString(BatteryRecorderError err)
         case BATTERY_REC_MCU_READ_FAILED:   return "Could not read the MCU.";
         case BATTERY_REC_SD_FAILED:         return "SD card write failed.";
         case BATTERY_REC_NO_FREE_NUMBER:    return "No free session number.";
+        case BATTERY_REC_SD_READ_FAILED:    return "Could not read the sessions folder.";
         case BATTERY_REC_SHUTTING_DOWN:     return "System is shutting down.";
         default:                            return "Unknown error.";
     }

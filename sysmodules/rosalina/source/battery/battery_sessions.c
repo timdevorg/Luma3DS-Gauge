@@ -238,12 +238,56 @@ static void batteryMaxCb(u32 number, void *ctx)
         *max = number;
 }
 
-u32 BatterySessions_NextNumber(void)
+// "last=NNNN" from the counter file (or its tmp), 0 if missing / unreadable
+static u32 batteryReadLastNumber(const char *path)
+{
+    char buf[24];
+    u32 len = 0, n = 0;
+    if (R_FAILED(BatteryFs_ReadHead(path, buf, sizeof(buf) - 1, &len)))
+        return 0;
+    buf[len] = 0;
+    if (strncmp(buf, "last=", 5) != 0)
+        return 0;
+    for (const char *p = buf + 5; *p >= '0' && *p <= '9' && n <= BATTERY_MAX_SESSION_NUMBER; p++)
+        n = 10 * n + (u32)(*p - '0');
+    return n <= BATTERY_MAX_SESSION_NUMBER ? n : 0;
+}
+
+u32 BatterySessions_LastUsedNumber(void)
+{
+    // Both: a power cut during the safe write can leave the newer number in the tmp only
+    u32 a = batteryReadLastNumber(BATTERY_LAST_SESSION_PATH);
+    u32 b = batteryReadLastNumber(BATTERY_LAST_SESSION_TMP_PATH);
+    return a > b ? a : b;
+}
+
+// Never reuses a number (F1): a deleted newest session would otherwise hand its number to the next recording, which
+// would then inherit the old session's curve_select.ini entry and its "in curve" / deviation display. The highest
+// number ever used is the max of the files on SD, the counter file (written by BatterySessions_ReserveNumber before
+// each new CSV) and alsoUsed (sessions in the loaded curve: covers numbers deleted before the counter file existed).
+// Existing SDs need no migration: without the counter file this is the old "max existing + 1".
+Result BatterySessions_NextNumber(u32 alsoUsed, u32 *outNumber)
 {
     u32 max = 0;
-    if (R_FAILED(batterySessionsForEach(batteryMaxCb, &max)))
-        return 0;
-    return max >= BATTERY_MAX_SESSION_NUMBER ? 0 : max + 1;
+    *outNumber = 0;
+    Result res = batterySessionsForEach(batteryMaxCb, &max);
+    if (R_FAILED(res))
+        return res;
+
+    u32 last = BatterySessions_LastUsedNumber();
+    if (last > max)
+        max = last;
+    if (alsoUsed > max)
+        max = alsoUsed;
+    *outNumber = max >= BATTERY_MAX_SESSION_NUMBER ? 0 : max + 1;
+    return 0;
+}
+
+Result BatterySessions_ReserveNumber(u32 number)
+{
+    char buf[24];
+    int n = sprintf(buf, "last=%04lu\n", number);
+    return BatteryFs_WriteSafely(BATTERY_LAST_SESSION_PATH, BATTERY_LAST_SESSION_TMP_PATH, buf, (u32)n);
 }
 
 typedef struct BatteryCollectCtx

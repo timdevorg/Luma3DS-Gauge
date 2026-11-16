@@ -13,6 +13,8 @@
 #define BATTERY_DIR             "/luma/battery"
 #define BATTERY_SESSIONS_DIR    "/luma/battery/sessions"
 #define BATTERY_STATE_PATH      "/luma/battery/state"
+#define BATTERY_LAST_SESSION_PATH     "/luma/battery/last_session"     // "last=NNNN": highest session number ever used
+#define BATTERY_LAST_SESSION_TMP_PATH "/luma/battery/last_session.tmp"
 
 #define BATTERY_MAX_SESSION_NUMBER  9999
 
@@ -77,8 +79,14 @@ Result BatteryFs_ReadTail(const char *path, void *data, u32 len, u32 *outLen);
 /// Reads up to len bytes from the start of the file.
 Result BatteryFs_ReadHead(const char *path, void *data, u32 len, u32 *outLen);
 
-/// Next free session number (max existing + 1), or 0 if none is left / the directory can't be read.
-u32 BatterySessions_NextNumber(void);
+/// Next session number: 1 + the highest of the session files on SD, the last_session counter and alsoUsed, so a
+/// number is never used twice, also after deleting the newest session. *outNumber = 0 if none is left (9999 used).
+/// Returns the FS error if the sessions directory can't be read (then *outNumber = 0).
+Result BatterySessions_NextNumber(u32 alsoUsed, u32 *outNumber);
+/// Records number as used (last_session, power-cut safe). Call before creating the session's CSV.
+Result BatterySessions_ReserveNumber(u32 number);
+/// The last_session counter (max of the file and its tmp), 0 if there is none.
+u32 BatterySessions_LastUsedNumber(void);
 
 /// Lists (up to BATTERY_MAX_LISTED_SESSIONS of the highest-numbered) sessions, ascending,
 /// and parses / classifies each of them. Not reentrant (static buffers): menu thread only.
