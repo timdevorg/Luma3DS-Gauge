@@ -76,6 +76,10 @@ void BatteryLed_HandleNotification(u32 notificationId);
 void BatteryLed_GetStatus(BatteryLedStatus *out);
 /// Loads config.ini if that hasn't happened yet (menu thread).
 void BatteryLed_EnsureConfigLoaded(void);
+/// What the boot load of config.ini replaced (invalid / out of range) or ignored (unknown keys).
+void BatteryLed_GetConfigReport(BatteryConfigReport *out);
+/// Diagnostics 4/4 showed the report: the home screen stops pointing to it.
+void BatteryLed_ConfigReportSeen(void);
 /// The saved settings (also ones saved during a sleep transition that aren't active yet).
 void BatteryLed_GetConfig(BatteryLedConfig *out);
 /// Applies (sanitized) settings, saves config.ini and wakes the thread. Clears a control error. Menu thread.

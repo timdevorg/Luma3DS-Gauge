@@ -1176,10 +1176,112 @@ static void settingsStepTests(void)
     printf("settings editor: cycling, limits and 20000-step random walk OK\n");
 }
 
+// config.ini check (BatteryLedConfig_ParseChecked / BatteryConfigCheck_Issues): which keys weren't used as written
+static u32 checkIssues(const char *text, BatteryLedConfig *c, BatteryConfigCheck *chk, BatteryConfigIssue *is)
+{
+    BatteryLedConfig_Defaults(c);
+    BatteryLedConfig plain;
+    BatteryLedConfig_Defaults(&plain);
+    bool a = BatteryLedConfig_ParseChecked(text, c, chk);
+    bool b = BatteryLedConfig_Parse(text, &plain);
+    BatteryLedConfig_Sanitize(c);
+    BatteryLedConfig_Sanitize(&plain);
+    CHECK(a == b && memcmp(c, &plain, sizeof(plain)) == 0); // same result with and without the check
+    return BatteryConfigCheck_Issues(chk, c, is);
+}
+
+static void configCheckTests(void)
+{
+    BatteryLedConfig c;
+    BatteryConfigCheck chk;
+    BatteryConfigIssue is[BATTERY_CFG_KEYS];
+
+    // The file BatteryLed_SetConfig writes, and the defaults: no issues, nothing unknown
+    u32 n = checkIssues("# Battery Manager settings (docs/battery-manager.md, section 12)\nled_override=1\nred_pct=12\n"
+                        "blink_pct=4\nblue_mode=5\n# sleep_mode: 1 dim blue (default), 5 bright blue, 0 off\nsleep_mode=1\n"
+                        "# bars: 1 ...\nbars=1\nbars_4=75\nbars_3=35\n", &c, &chk, is);
+    CHECK(n == 0 && chk.unknownCount == 0 && chk.present == 0xFF && chk.invalid == 0);
+    CHECK(checkIssues("", &c, &chk, is) == 0 && chk.present == 0);
+    // Legacy sleep_mode values are no issue; CRLF and trailing comments / spaces are fine
+    CHECK(checkIssues("sleep_mode=2\r\nred_pct=10 # ten\nblink_pct=3  \nsleep_mode=system\n", &c, &chk, is) == 0);
+    CHECK(checkIssues("sleep_mode=anim\n", &c, &chk, is) == 0 && c.sleepMode == BATTERY_LED_SLEEP_SYSTEM);
+
+    // Out of range (Sanitize changed it) and not a number (value before kept)
+    n = checkIssues("red_pct=0\nled_override=yes\nblue_mode=3\nsleep_mode=7\nbars=2\n", &c, &chk, is);
+    CHECK(n == 5);
+    CHECK(is[0].key == BATTERY_CFG_KEY_OVERRIDE && is[0].kind == BATTERY_CFG_ISSUE_INVALID && is[0].used == 0 &&
+          strcmp(is[0].raw, "yes") == 0);
+    CHECK(is[1].key == BATTERY_CFG_KEY_RED && is[1].kind == BATTERY_CFG_ISSUE_RANGE && is[1].used == 1 && strcmp(is[1].raw, "0") == 0);
+    CHECK(is[2].key == BATTERY_CFG_KEY_BLUE_MODE && is[2].used == 5 && is[3].key == BATTERY_CFG_KEY_SLEEP_MODE && is[3].used == 1);
+    CHECK(is[4].key == BATTERY_CFG_KEY_BARS && is[4].kind == BATTERY_CFG_ISSUE_RANGE && is[4].used == 1);
+    // Order: blink >= red -> blink reported with the value used; a bars pair that doesn't fit -> the defaults, each
+    // key reported only if its value changed (bars_3=40 is the default: used as written)
+    n = checkIssues("red_pct=5\nblink_pct=9\nbars_4=30\nbars_3=40\n", &c, &chk, is);
+    CHECK(n == 2 && is[0].key == BATTERY_CFG_KEY_BLINK && is[0].used == 4 && is[1].key == BATTERY_CFG_KEY_BARS4 &&
+          is[1].used == 70);
+    n = checkIssues("bars_4=30\nbars_3=50\n", &c, &chk, is);
+    CHECK(n == 2 && is[0].used == 70 && is[1].used == 40);
+    // red_pct=45 moves the (absent) bars_3: not an issue of the file
+    CHECK(checkIssues("red_pct=45\n", &c, &chk, is) == 0 && c.bars3Pct == 46);
+    // Long numbers: cut text, 255 parsed, clamped
+    n = checkIssues("red_pct=123456789\n", &c, &chk, is);
+    CHECK(n == 1 && is[0].used == 50 && strcmp(is[0].raw, "1234567") == 0);
+    // Text after a number: the number is used, reported as not a number
+    n = checkIssues("red_pct=12abc\n", &c, &chk, is);
+    CHECK(n == 1 && is[0].kind == BATTERY_CFG_ISSUE_INVALID && is[0].used == 12 && c.redPct == 12 && strcmp(is[0].raw, "12abc") == 0);
+    // Empty value, negative, a word other than the legacy ones
+    n = checkIssues("blink_pct=\nred_pct=-1\nsleep_mode=systemx\n", &c, &chk, is);
+    CHECK(n == 3 && is[0].kind == BATTERY_CFG_ISSUE_INVALID && is[0].used == 10 && is[1].used == 3 && is[1].raw[0] == 0 &&
+          is[2].used == 1);
+    // The last line of a key counts: a bad value fixed by a later line is no issue (and the other way round)
+    CHECK(checkIssues("red_pct=x\nred_pct=12\n", &c, &chk, is) == 0 && c.redPct == 12);
+    n = checkIssues("red_pct=12\nred_pct=x\n", &c, &chk, is);
+    CHECK(n == 1 && is[0].used == 12 && strcmp(is[0].raw, "x") == 0);
+
+    // Unknown keys: counted, the first name kept (cut at 12), comments and lines without '=' ignored
+    n = checkIssues("# red_pct=0\nfoo=1\nled_overide=1\n red_pct=3\nblah\n=5\nsleep_modes=5\n", &c, &chk, is);
+    CHECK(n == 0 && chk.unknownCount == 4 && strcmp(chk.unknown, "foo") == 0 && c.redPct == 10);
+    checkIssues("a_very_long_unknown_key=1\n", &c, &chk, is);
+    CHECK(chk.unknownCount == 1 && strcmp(chk.unknown, "a_very_long_") == 0);
+    // NULL check: plain parse
+    BatteryLedConfig_Defaults(&c);
+    CHECK(BatteryLedConfig_ParseChecked("red_pct=12\n", &c, NULL) && c.redPct == 12);
+    CHECK(strcmp(BatteryLedConfig_KeyName(BATTERY_CFG_KEY_BARS3), "bars_3") == 0 && strcmp(BatteryLedConfig_KeyName(99), "?") == 0);
+
+    // Random files: never more than 8 issues, every issue's "used" is the sanitized value, same config as Parse
+    static const char *const parts[] = {
+        "led_override=", "red_pct=", "blink_pct=", "blue_mode=", "sleep_mode=", "bars=", "bars_4=", "bars_3=", "foo=",
+        "0", "1", "2", "5", "9", "40", "99", "255", "99999", "x", "system", "anim", "-1", " ", "#", "\n", "\r\n", "=",
+    };
+    u32 rs = 0x9e3779b9u;
+    for (u32 i = 0; i < 100000; i++)
+    {
+        char text[256];
+        u32 len = 0;
+        for (u32 k = 0; k < 24; k++)
+        {
+            rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5;
+            const char *pt = parts[rs % (sizeof(parts) / sizeof(parts[0]))];
+            u32 pl = (u32)strlen(pt);
+            if (len + pl >= sizeof(text))
+                break;
+            memcpy(text + len, pt, pl);
+            len += pl;
+        }
+        text[len] = 0;
+        n = checkIssues(text, &c, &chk, is);
+        CHECK(n <= BATTERY_CFG_KEYS);
+        for (u32 k = 0; k < n; k++)
+            CHECK(is[k].used == BatteryLedConfig_KeyValue(&c, is[k].key) && strlen(is[k].raw) <= BATTERY_CFG_RAW_CHARS);
+    }
+    printf("config.ini check: invalid / out of range / unknown keys recorded, same config as the plain parse\n");
+}
+
 int main(int argc, char **argv)
 {
     unitTests();
     settingsStepTests();
+    configCheckTests();
 
     if (argc < 2)
     {

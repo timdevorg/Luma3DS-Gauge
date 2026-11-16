@@ -60,77 +60,147 @@ void BatteryLedConfig_Sanitize(BatteryLedConfig *cfg)
     }
 }
 
+static const char *const g_cfgKeyNames[BATTERY_CFG_KEYS] = {
+    "led_override", "red_pct", "blink_pct", "blue_mode", "sleep_mode", "bars", "bars_4", "bars_3",
+};
+
+const char *BatteryLedConfig_KeyName(u8 key)
+{
+    return key < BATTERY_CFG_KEYS ? g_cfgKeyNames[key] : "?";
+}
+
+u8 BatteryLedConfig_KeyValue(const BatteryLedConfig *cfg, u8 key)
+{
+    switch (key)
+    {
+        case BATTERY_CFG_KEY_OVERRIDE:      return cfg->override ? 1 : 0;
+        case BATTERY_CFG_KEY_RED:           return cfg->redPct;
+        case BATTERY_CFG_KEY_BLINK:         return cfg->blinkPct;
+        case BATTERY_CFG_KEY_BLUE_MODE:     return cfg->blueMode;
+        case BATTERY_CFG_KEY_SLEEP_MODE:    return cfg->sleepMode;
+        case BATTERY_CFG_KEY_BARS:          return cfg->bars ? 1 : 0;
+        case BATTERY_CFG_KEY_BARS4:         return cfg->bars4Pct;
+        case BATTERY_CFG_KEY_BARS3:         return cfg->bars3Pct;
+        default:                            return 0;
+    }
+}
+
+static void batteryLedConfigSet(BatteryLedConfig *cfg, u32 key, u32 v)
+{
+    u8 v8 = (u8)(v > 255 ? 255 : v);
+    switch (key)
+    {
+        case BATTERY_CFG_KEY_OVERRIDE:      cfg->override = v != 0; break;
+        case BATTERY_CFG_KEY_RED:           cfg->redPct = v8; break;
+        case BATTERY_CFG_KEY_BLINK:         cfg->blinkPct = v8; break;
+        case BATTERY_CFG_KEY_BLUE_MODE:     cfg->blueMode = v8; break;
+        case BATTERY_CFG_KEY_SLEEP_MODE:    cfg->sleepMode = v8; break; // invalid values: default in Sanitize
+        case BATTERY_CFG_KEY_BARS:          cfg->bars = v != 0; break;
+        case BATTERY_CFG_KEY_BARS4:         cfg->bars4Pct = v8; break;  // checked with bars_3 / red_pct in Sanitize
+        case BATTERY_CFG_KEY_BARS3:         cfg->bars3Pct = v8; break;
+        default:                            break;
+    }
+}
+
+// End of a value: end of line / file, or a space / tab / '#' comment after it
+static bool batteryCfgValueEnd(char c)
+{
+    return c == 0 || c == '\n' || c == '\r' || c == ' ' || c == '\t' || c == '#';
+}
+
 bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
 {
+    return BatteryLedConfig_ParseChecked(buf, cfg, NULL);
+}
+
+bool BatteryLedConfig_ParseChecked(const char *buf, BatteryLedConfig *cfg, BatteryConfigCheck *chk)
+{
+    if (chk != NULL)
+        memset(chk, 0, sizeof(*chk));
+
     bool any = false;
     for (const char *p = buf; *p != 0;)
     {
         const char *eq = p;
         while (*eq != 0 && *eq != '=' && *eq != '\n')
             eq++;
-        u32 wordLen = 0;
-        if (*eq == '=' && (u32)(eq - p) == 10 && strncmp(p, "sleep_mode", 10) == 0)
-        {
-            if (strncmp(eq + 1, "system", 6) == 0)
-                wordLen = 6;
-            else if (strncmp(eq + 1, "anim", 4) == 0)
-                wordLen = 4;
-            char t = wordLen != 0 ? eq[1 + wordLen] : 'x';
-            if (!(t == 0 || t == '\n' || t == '\r' || t == ' ' || t == '#'))
-                wordLen = 0;
-        }
-        if (wordLen != 0)
-        {
-            cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // legacy words "system" / "anim": off (stock ptm)
-            any = true;
-        }
-        else if (*eq == '=' && *p != '#' && eq[1] >= '0' && eq[1] <= '9')
-        {
-            u32 v = 0;
-            for (const char *d = eq + 1; *d >= '0' && *d <= '9' && v < 1000; d++)
-                v = 10 * v + (u32)(*d - '0');
-            u8 v8 = (u8)(v > 255 ? 255 : v);
-            u32 keyLen = (u32)(eq - p);
+        u32 keyLen = (u32)(eq - p);
 
-            if (keyLen == 12 && strncmp(p, "led_override", 12) == 0)
+        if (*eq == '=' && *p != '#')
+        {
+            u32 key = BATTERY_CFG_KEYS;
+            for (u32 k = 0; k < BATTERY_CFG_KEYS; k++)
+                if (strlen(g_cfgKeyNames[k]) == keyLen && strncmp(p, g_cfgKeyNames[k], keyLen) == 0)
+                    key = k;
+
+            const char *val = eq + 1;
+            if (key == BATTERY_CFG_KEYS)
             {
-                cfg->override = v != 0;
-                any = true;
+                // Unknown name (also a typo or leading spaces): ignored, counted for the report
+                if (chk != NULL && keyLen != 0)
+                {
+                    if (chk->unknownCount == 0)
+                    {
+                        u32 n = keyLen < BATTERY_CFG_UNKNOWN_CHARS ? keyLen : BATTERY_CFG_UNKNOWN_CHARS;
+                        memcpy(chk->unknown, p, n);
+                        chk->unknown[n] = 0;
+                    }
+                    if (chk->unknownCount < 255)
+                        chk->unknownCount++;
+                }
             }
-            else if (keyLen == 7 && strncmp(p, "red_pct", 7) == 0)
+            else
             {
-                cfg->redPct = v8;
-                any = true;
-            }
-            else if (keyLen == 9 && strncmp(p, "blink_pct", 9) == 0)
-            {
-                cfg->blinkPct = v8;
-                any = true;
-            }
-            else if (keyLen == 9 && strncmp(p, "blue_mode", 9) == 0)
-            {
-                cfg->blueMode = v8;
-                any = true;
-            }
-            else if (keyLen == 10 && strncmp(p, "sleep_mode", 10) == 0)
-            {
-                cfg->sleepMode = v8; // invalid values become the default in BatteryLedConfig_Sanitize
-                any = true;
-            }
-            else if (keyLen == 4 && strncmp(p, "bars", 4) == 0)
-            {
-                cfg->bars = v != 0;
-                any = true;
-            }
-            else if (keyLen == 6 && strncmp(p, "bars_4", 6) == 0)
-            {
-                cfg->bars4Pct = v8; // checked together with bars_3 / red_pct in BatteryLedConfig_Sanitize
-                any = true;
-            }
-            else if (keyLen == 6 && strncmp(p, "bars_3", 6) == 0)
-            {
-                cfg->bars3Pct = v8;
-                any = true;
+                u32 wordLen = 0;
+                if (key == BATTERY_CFG_KEY_SLEEP_MODE)
+                {
+                    if (strncmp(val, "system", 6) == 0)
+                        wordLen = 6;
+                    else if (strncmp(val, "anim", 4) == 0)
+                        wordLen = 4;
+                    if (wordLen != 0 && !batteryCfgValueEnd(val[wordLen]))
+                        wordLen = 0;
+                }
+
+                bool valid = false;
+                u8 parsed = 0;
+                if (wordLen != 0)
+                {
+                    cfg->sleepMode = BATTERY_LED_SLEEP_SYSTEM; // legacy words "system" / "anim": off (stock ptm)
+                    valid = true;
+                    any = true;
+                }
+                else if (*val >= '0' && *val <= '9')
+                {
+                    u32 v = 0;
+                    const char *d = val;
+                    for (; *d >= '0' && *d <= '9' && v < 1000; d++)
+                        v = 10 * v + (u32)(*d - '0');
+                    while (*d >= '0' && *d <= '9')
+                        d++; // digits beyond the cap: still a number (255 after the cap)
+                    batteryLedConfigSet(cfg, key, v);
+                    any = true;
+                    parsed = (u8)(v > 255 ? 255 : v);
+                    if (key == BATTERY_CFG_KEY_SLEEP_MODE && parsed == BATTERY_LED_MODE_SLEEP)
+                        parsed = BATTERY_LED_SLEEP_SYSTEM; // legacy anim(2): off, not an issue
+                    valid = batteryCfgValueEnd(*d); // "12abc": 12 is used, reported as invalid
+                }
+                // else: not a number, the value before is kept (reported)
+
+                if (chk != NULL)
+                {
+                    u8 bit = (u8)(1u << key);
+                    chk->present |= bit;
+                    chk->invalid = valid ? (u8)(chk->invalid & ~bit) : (u8)(chk->invalid | bit);
+                    chk->parsed[key] = parsed;
+                    u32 n = 0;
+                    while (n < BATTERY_CFG_RAW_CHARS && val[n] != 0 && val[n] != '\n' && val[n] != '\r')
+                        n++;
+                    while (n > 0 && (val[n - 1] == ' ' || val[n - 1] == '\t'))
+                        n--;
+                    memcpy(chk->raw[key], val, n);
+                    chk->raw[key][n] = 0;
+                }
             }
         }
 
@@ -140,6 +210,27 @@ bool BatteryLedConfig_Parse(const char *buf, BatteryLedConfig *cfg)
             p++;
     }
     return any;
+}
+
+u32 BatteryConfigCheck_Issues(const BatteryConfigCheck *chk, const BatteryLedConfig *final, BatteryConfigIssue *out)
+{
+    u32 n = 0;
+    for (u32 k = 0; k < BATTERY_CFG_KEYS; k++)
+    {
+        u8 bit = (u8)(1u << k);
+        if (!(chk->present & bit))
+            continue;
+        u8 used = BatteryLedConfig_KeyValue(final, (u8)k);
+        bool invalid = (chk->invalid & bit) != 0;
+        if (!invalid && chk->parsed[k] == used)
+            continue;
+        out[n].key = (u8)k;
+        out[n].kind = invalid ? BATTERY_CFG_ISSUE_INVALID : BATTERY_CFG_ISSUE_RANGE;
+        out[n].used = used;
+        memcpy(out[n].raw, chk->raw[k], sizeof(out[n].raw));
+        n++;
+    }
+    return n;
 }
 
 // ---- Decision ----

@@ -153,7 +153,79 @@ typedef struct BatteryLedSmoother
     u32 count;
 } BatteryLedSmoother;
 
+/// config.ini keys, in file order (BatteryConfigCheck, BatteryLedConfig_KeyName)
+typedef enum BatteryConfigKey
+{
+    BATTERY_CFG_KEY_OVERRIDE = 0,   // led_override
+    BATTERY_CFG_KEY_RED,            // red_pct
+    BATTERY_CFG_KEY_BLINK,          // blink_pct
+    BATTERY_CFG_KEY_BLUE_MODE,      // blue_mode
+    BATTERY_CFG_KEY_SLEEP_MODE,     // sleep_mode
+    BATTERY_CFG_KEY_BARS,           // bars
+    BATTERY_CFG_KEY_BARS4,          // bars_4
+    BATTERY_CFG_KEY_BARS3,          // bars_3
+    BATTERY_CFG_KEYS,
+} BatteryConfigKey;
+
+#define BATTERY_CFG_RAW_CHARS       7   // value text kept per key (cut)
+#define BATTERY_CFG_UNKNOWN_CHARS   12  // name kept of the first unknown key (cut)
+
+/// What BatteryLedConfig_ParseChecked saw, per known key (the last line of a key counts), plus unknown keys.
+typedef struct BatteryConfigCheck
+{
+    u8 present;                 // bit per BatteryConfigKey: a "key=" line was found
+    u8 invalid;                 // bit per key: its value isn't a number (or has text after the number)
+    u8 parsed[BATTERY_CFG_KEYS];    // value as parsed (before BatteryLedConfig_Sanitize), 0..255
+    char raw[BATTERY_CFG_KEYS][BATTERY_CFG_RAW_CHARS + 1]; // value text as in the file (cut)
+    u8 unknownCount;            // "name=value" lines with a name that isn't a key (capped at 255)
+    char unknown[BATTERY_CFG_UNKNOWN_CHARS + 1]; // the first one's name (cut)
+} BatteryConfigCheck;
+
+typedef enum BatteryConfigIssueKind
+{
+    BATTERY_CFG_ISSUE_INVALID = 0,  // not a number: the value before (default) was kept
+    BATTERY_CFG_ISSUE_RANGE,        // a number that BatteryLedConfig_Sanitize had to change (range / order)
+} BatteryConfigIssueKind;
+
+typedef struct BatteryConfigIssue
+{
+    u8 key;                     // BatteryConfigKey
+    u8 kind;                    // BatteryConfigIssueKind
+    u8 used;                    // the value used instead (0 / 1 for led_override and bars)
+    char raw[BATTERY_CFG_RAW_CHARS + 1];
+} BatteryConfigIssue;
+
+typedef enum BatteryConfigSource
+{
+    BATTERY_CFG_SOURCE_DEFAULTS = 0,    // no readable config.ini / config.tmp with a known key
+    BATTERY_CFG_SOURCE_INI,
+    BATTERY_CFG_SOURCE_TMP,             // config.tmp (left over by a power cut during a save)
+} BatteryConfigSource;
+
+/// The boot load's findings (battery_led.c keeps one; Diagnostics 4/4 and the home screen note show it).
+typedef struct BatteryConfigReport
+{
+    bool loaded;                // config load done (else nothing to show yet)
+    u8 source;                  // BatteryConfigSource
+    u8 count;                   // issues
+    BatteryConfigIssue issue[BATTERY_CFG_KEYS];
+    u8 unknownCount;
+    char unknown[BATTERY_CFG_UNKNOWN_CHARS + 1];
+    bool seen;                  // Diagnostics 4/4 was opened: the home screen note is gone
+    bool saved;                 // config.ini was saved since (rewritten with valid values): note gone
+} BatteryConfigReport;
+
 void BatteryLedConfig_Defaults(BatteryLedConfig *cfg);
+/// "led_override", "red_pct", ... ("?" for anything else).
+const char *BatteryLedConfig_KeyName(u8 key);
+/// Value of a key in cfg as config.ini writes it.
+u8 BatteryLedConfig_KeyValue(const BatteryLedConfig *cfg, u8 key);
+/// BatteryLedConfig_Parse that also records what it saw into chk (cleared first; may be NULL). Same results.
+bool BatteryLedConfig_ParseChecked(const char *buf, BatteryLedConfig *cfg, BatteryConfigCheck *chk);
+/// The keys whose value wasn't used as written: not a number, or changed by BatteryLedConfig_Sanitize (final = the
+/// sanitized result of the parse). Legacy sleep_mode 2 / "system" / "anim" are not issues. Fills out[] in key order,
+/// returns the count (at most BATTERY_CFG_KEYS).
+u32 BatteryConfigCheck_Issues(const BatteryConfigCheck *chk, const BatteryLedConfig *final, BatteryConfigIssue *out);
 /// Parses config.ini ("key=value" lines, '#' comments; keys led_override, red_pct, blink_pct,
 /// blue_mode, sleep_mode (a number, or "system" / "anim" = 0; legacy 2 -> 0), bars, bars_4, bars_3; unknown keys ignored). Only keys present are changed. Returns true if any key was found.
 /// Call BatteryLedConfig_Sanitize afterwards.

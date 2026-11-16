@@ -83,6 +83,7 @@ static struct
     BatteryLedConfig cfg;
     bool cfgPending;        // settings saved during a sleep transition, applied by the thread once awake (F2)
     BatteryLedConfig pendingCfg;
+    BatteryConfigReport cfgReport; // what the boot load of config.ini replaced / ignored (read-only diagnostics)
     BatteryLedLogic logic;
     BatteryLedWatch watch;
     BatteryLedSmoother volt;
@@ -517,14 +518,15 @@ static void batteryLedPoll(void)
 
 // ---- Settings (config.ini) ----
 
-// g_cfgFileLock must be held
-static bool batteryLedReadConfigFileLocked(const char *path, BatteryLedConfig *cfg)
+// g_cfgFileLock must be held. chk: what the parse saw (for the boot report)
+static bool batteryLedReadConfigFileLocked(const char *path, BatteryLedConfig *cfg, BatteryConfigCheck *chk)
 {
     u32 len = 0;
+    memset(chk, 0, sizeof(*chk));
     if (R_FAILED(BatteryFs_ReadHead(path, g_cfgBuf, sizeof(g_cfgBuf) - 1, &len)) || len == 0)
         return false;
     g_cfgBuf[len] = 0;
-    return BatteryLedConfig_Parse(g_cfgBuf, cfg);
+    return BatteryLedConfig_ParseChecked(g_cfgBuf, cfg, chk);
 }
 
 void BatteryLed_EnsureConfigLoaded(void)
@@ -536,28 +538,62 @@ void BatteryLed_EnsureConfigLoaded(void)
 
     if (!loaded)
     {
+        // Static (under g_cfgFileLock): this also runs on the LED thread's 2 KB stack at boot
+        static BatteryConfigCheck chk, chkTmp;
+        static BatteryConfigReport rep;
         BatteryLedConfig cfg;
         BatteryLedConfig_Defaults(&cfg);
+        memset(&rep, 0, sizeof(rep));
         // config.ini, or config.tmp if a power cut hit between delete and rename. After a good config.ini a
         // leftover config.tmp (interrupted save) is deleted, so it can't come back if config.ini is deleted later
         // (F4; SetConfig's safe write is under the same g_cfgFileLock, so this can't hit one in progress)
-        if (batteryLedReadConfigFileLocked(BATTERY_CONFIG_PATH, &cfg))
+        const BatteryConfigCheck *used = &chk; // config.ini's findings unless config.tmp is the one used
+        if (batteryLedReadConfigFileLocked(BATTERY_CONFIG_PATH, &cfg, &chk))
+        {
+            rep.source = BATTERY_CFG_SOURCE_INI;
             BatteryFs_Delete(BATTERY_CONFIG_TMP_PATH);
+        }
         else
         {
             BatteryLedConfig_Defaults(&cfg);
-            if (!batteryLedReadConfigFileLocked(BATTERY_CONFIG_TMP_PATH, &cfg))
-                BatteryLedConfig_Defaults(&cfg);
+            if (batteryLedReadConfigFileLocked(BATTERY_CONFIG_TMP_PATH, &cfg, &chkTmp))
+            {
+                rep.source = BATTERY_CFG_SOURCE_TMP;
+                used = &chkTmp;
+            }
+            else
+                BatteryLedConfig_Defaults(&cfg); // config.ini's unknown keys (if any) are still reported
         }
         BatteryLedConfig_Sanitize(&cfg);
 
+        // Which values weren't used as written (shown once: home screen note, Diagnostics 4/4)
+        rep.loaded = true;
+        rep.count = (u8)BatteryConfigCheck_Issues(used, &cfg, rep.issue);
+        rep.unknownCount = used->unknownCount;
+        memcpy(rep.unknown, used->unknown, sizeof(rep.unknown));
+
         LightLock_Lock(&g_led.lock);
         g_led.cfg = cfg;
+        g_led.cfgReport = rep;
         g_led.configLoaded = true;
         BatteryLedLogic_Reevaluate(&g_led.logic);
         LightLock_Unlock(&g_led.lock);
     }
     LightLock_Unlock(&g_cfgFileLock);
+}
+
+void BatteryLed_GetConfigReport(BatteryConfigReport *out)
+{
+    LightLock_Lock(&g_led.lock);
+    *out = g_led.cfgReport;
+    LightLock_Unlock(&g_led.lock);
+}
+
+void BatteryLed_ConfigReportSeen(void)
+{
+    LightLock_Lock(&g_led.lock);
+    g_led.cfgReport.seen = true;
+    LightLock_Unlock(&g_led.lock);
 }
 
 void BatteryLed_GetConfig(BatteryLedConfig *out)
@@ -632,6 +668,12 @@ Result BatteryLed_SetConfig(const BatteryLedConfig *newCfg)
         (u32)(cfg.bars ? 1 : 0), (u32)cfg.bars4Pct, (u32)cfg.bars3Pct);
     Result res = BatteryFs_WriteSafely(BATTERY_CONFIG_PATH, BATTERY_CONFIG_TMP_PATH, g_cfgBuf, (u32)n);
     LightLock_Unlock(&g_cfgFileLock);
+    if (R_SUCCEEDED(res))
+    {
+        LightLock_Lock(&g_led.lock);
+        g_led.cfgReport.saved = true; // config.ini now holds valid values only (unknown keys are gone too)
+        LightLock_Unlock(&g_led.lock);
+    }
     return res;
 }
 
