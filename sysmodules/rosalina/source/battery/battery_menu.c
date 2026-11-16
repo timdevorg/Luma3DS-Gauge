@@ -2,8 +2,9 @@
 *   This file is part of Luma3DS-Gauge, an unofficial fork of Luma3DS.
 *   Licensed under the GNU General Public License v3 or later, see LICENSE.txt.
 *
-*   Battery Manager: Rosalina submenu (settings, learning: recording / sessions / curve / graph, advanced: diagnostics,
-*   LED test, blue LED type, restore previous curve, limits; setup guide). Settings only go through BatteryLed_SetConfig; nothing here writes to the MCU or ptm.
+*   Battery Manager: Rosalina screens (home screen with a live summary; settings, learning: recording / sessions / curve /
+*   graph, advanced: diagnostics in 3 pages, LED test, blue LED type, restore previous curve, limits; setup guide).
+*   Settings only go through BatteryLed_SetConfig; nothing here writes to the MCU or ptm.
 */
 
 #include <3ds.h>
@@ -14,6 +15,7 @@
 #include "memory.h"
 #include "luma_config.h"
 #include "battery/battery_menu.h"
+#include "battery/battery_menu_logic.h"
 #include "battery/battery_mcu.h"
 #include "battery/battery_recorder.h"
 #include "battery/battery_sessions.h"
@@ -23,15 +25,17 @@
 #include "battery/battery_ptm_patch.h"
 #include "battery/battery_ptm_bars.h"
 
-#define BATTERY_MENU_LINE_CHARS     49 // (320 - 2 * 10) / 6 - 1
 #define BATTERY_MENU_LIST_ROWS      15
-#define BATTERY_MENU_BODY_LINES     17 // y = 30 .. 206; the hint row is at SCREEN_BOT_HEIGHT - 20
 #define BATTERY_SESSION_ROWS        13 // Sessions list: header, 13 rows, blank, legend / feedback
+#define BATTERY_MENU_BODY_END       (30 + BATTERY_MENU_BODY_LINES * SPACING_Y) // y of the first row below the body
 
-// Menu tree (docs/battery-manager.md, section 4.2). Settings are edited on one screen and saved when it is left, so no
-// item title depends on config.ini. The only dynamic title is Start / Stop recording, refreshed by its visibility callback
-// (menuDraw calls it on every redraw, about once a second) into a static buffer padded to a fixed length, because the
-// menu redraws without clearing.
+_Static_assert(BATTERY_LED_ERR_NONE == 0, "battery_menu_logic.c treats a led error of 0 as none");
+
+// Menu tree (docs/battery-manager.md, section 4.2). The Rosalina entry opens BatteryMenu_Home, a custom screen (summary +
+// four entries) that opens Learning... and Advanced... with menuShow, so those two stay ordinary Rosalina menus. Settings
+// are edited on one screen and saved when it is left, so no item title depends on config.ini. The only dynamic title is
+// Start / Stop recording, refreshed by its visibility callback (menuDraw calls it on every redraw, about once a second)
+// into a static buffer padded to a fixed length, because the menu redraws without clearing.
 
 static void batteryMenuSettings(void);
 static void batteryMenuRecording(void);
@@ -73,16 +77,29 @@ static Menu batteryAdvancedMenu = {
     }
 };
 
-Menu batteryMenu = {
-    "Battery Manager",
-    {
-        { "Settings", METHOD, .method = &batteryMenuSettings },
-        { "Learning...", MENU, .menu = &batteryLearningMenu },
-        { "Setup guide", METHOD, .method = &batteryMenuSetupGuide },
-        { "Advanced...", MENU, .menu = &batteryAdvancedMenu },
-        {},
-    }
+static void batteryOpenLearning(void)
+{
+    menuShow(&batteryLearningMenu);
+}
+
+static void batteryOpenAdvanced(void)
+{
+    menuShow(&batteryAdvancedMenu);
+}
+
+// The home screen's entries (BatteryMenu_Home), in the order of the former main menu
+static const struct
+{
+    const char *title;
+    void (*open)(void);
+} g_homeEntries[] = {
+    { "Settings", batteryMenuSettings },
+    { "Learning...", batteryOpenLearning },
+    { "Setup guide", batteryMenuSetupGuide },
+    { "Advanced...", batteryOpenAdvanced },
 };
+
+#define BATTERY_HOME_ENTRIES (sizeof(g_homeEntries) / sizeof(g_homeEntries[0]))
 
 // "5", "none", "?" or "-" for the Sleep diagnostics line
 static void batteryFormatSleepMode(char *out, u8 mode, bool pending, bool isWrite)
@@ -117,10 +134,11 @@ static u32 batteryMenuLine(u32 y, u32 color, const char *fmt, ...)
     return y + SPACING_Y;
 }
 
-static void batteryFormatDuration(char *out, u32 ms)
+// Blank lines from y to the end of the body, so a screen whose line count varies leaves no residue. Draw_Lock must be held.
+static void batteryMenuPadBody(u32 y)
 {
-    u32 s = ms / 1000;
-    sprintf(out, "%lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
+    while (y < BATTERY_MENU_BODY_END)
+        y = batteryMenuLine(y, COLOR_WHITE, "");
 }
 
 // ---- Text screens (messages, confirmations, setup guide) ----
@@ -213,198 +231,307 @@ static void batteryFormatX10(char *out, float v)
     sprintf(out, "%lu.%lu", x10 / 10, x10 % 10);
 }
 
-// Advanced > Diagnostics: raw gauge, LED, ptm patch and recorder values, refreshed every second
+// ---- Advanced > Diagnostics: raw gauge, LED, ptm patch and recorder values in 3 pages, refreshed every second ----
+
+typedef struct BatteryDiagData
+{
+    Result res;                 // BatteryMcu_ReadSample
+    BatteryMcuSample s;
+    BatteryRecorderStatus st;
+    BatteryLedStatus led;
+    BatteryPtmPatchStatus ptm;
+    BatteryBarsStatus bars;
+    bool haveBak;               // curve.bak, read once when Diagnostics opens
+    u16 bakCount;
+} BatteryDiagData;
+
+static BatteryDiagData g_diag; // menu thread only
+
+static void batteryFormatBootS(char *out, u64 ms)
+{
+    if (ms == 0)
+        memcpy(out, "-", 2);
+    else
+        batteryFormatX10(out, ms / 1000.0f);
+}
+
+// Page 1: gauge and LED. Draw_Lock must be held.
+static u32 batteryDiagGaugeLed(u32 y, const BatteryDiagData *d)
+{
+    const BatteryMcuSample *s = &d->s;
+    const BatteryLedStatus *led = &d->led;
+    char num[16], num2[16], line1[64], line2[64];
+    bool ok = R_SUCCEEDED(d->res);
+
+    if (ok)
+    {
+        u32 p = BatteryMcu_PercentX10(s->pctInt, s->pctFrac);
+        bool adapter = (s->flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
+        bool charging = (s->flags & BATTERY_MCU_FLAG_CHARGING) != 0;
+
+        y = batteryMenuLine(y, COLOR_WHITE, "MCU charge:     %lu.%lu%%  (stock gauge)", p / 10, p % 10);
+        // Same value the LED uses (median voltage); instantaneous voltage before the LED thread's first poll
+        float c = led->haveData ? led->corrected : BatteryCurve_Corrected(s->pctInt + s->pctFrac / 256.0f, (float)s->voltageRaw);
+        if (c >= 0.0f)
+        {
+            batteryFormatX10(num, c);
+            batteryFormatX10(num2, led->haveData ? led->voltSmoothed : (float)s->voltageRaw);
+            y = batteryMenuLine(y, COLOR_WHITE, "Corrected:      %s%%  (volt median %s raw)", num, num2);
+        }
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "Corrected:      no curve yet");
+        // Both scales of the raw byte, labelled: which one is right is open (docs 16.13)
+        BatteryDiag_FormatVoltage(line1, line2, s->voltageRaw);
+        y = batteryMenuLine(y, COLOR_WHITE, "%s", line1);
+        y = batteryMenuLine(y, COLOR_WHITE, "%s", line2);
+        // Same unit and rounding as the Rosalina footer (menu.c)
+        bool fahrenheit = (lumaMcuConfig.flags & MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT) != 0;
+        y = batteryMenuLine(y, COLOR_WHITE, "Temp: %lu\xF8%c  Adapter: %s  Charging: %s", BatteryMenu_Temperature(s->temperature, fahrenheit),
+                            fahrenheit ? 'F' : 'C', adapter ? "yes" : "no", charging ? "yes" : "no");
+        if (s->infoValid)
+            y = batteryMenuLine(y, COLOR_WHITE, "Vendor: %lu  RCOMP: 0x%02lx  MGIC: %lu.%lu",
+                                (u32)s->info[2], (u32)s->info[5], (u32)s->info[3], (u32)s->info[4]);
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "Info table (0x7F) unavailable");
+    }
+    else
+    {
+        y = batteryMenuLine(y, COLOR_RED, "MCU read failed (0x%08lx).", (u32)d->res);
+        for (u32 i = 0; i < 5; i++)
+            y = batteryMenuLine(y, COLOR_WHITE, "");
+    }
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+
+    // LED control
+    if (led->reason == BATTERY_LED_REASON_OFF)
+        y = batteryMenuLine(y, COLOR_WHITE, "LED control:    OFF%s", led->fastPolling ? "  (fast poll)" : "");
+    else
+        y = batteryMenuLine(y, led->cfg.override ? COLOR_GREEN : COLOR_WHITE, "LED control:    %s  (%s%s)",
+                            led->cfg.override ? "ON" : "OFF", BatteryLedLogic_ReasonName(led->reason),
+                            led->fastPolling ? ", fast poll" : "");
+    if (ok && s->ledModeValid)
+        y = batteryMenuLine(y, COLOR_WHITE, "LED desired:    %-9s actual(0x29): %lu", BatteryLedLogic_ModeName(led->desired), (u32)s->ledMode);
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "LED desired:    %-9s actual(0x29): ?", BatteryLedLogic_ModeName(led->desired));
+    if (ok && s->infoValid)
+        y = batteryMenuLine(y, COLOR_WHITE, "Red LED: %-3s  Blue: %-3lu  Written: %s",
+                            s->info[0x0A] ? "on" : "off", (u32)s->info[0x0B], BatteryLedLogic_ModeName(led->lastWritten));
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Red LED: ?    Blue: ?    Written: %s", BatteryLedLogic_ModeName(led->lastWritten));
+    u32 sessionReasserts = d->st.recording ? led->reasserts - d->st.reassertBase : 0;
+    if (led->haveMismatch)
+    {
+        batteryFormatX10(num, led->lastMismatchPct);
+        y = batteryMenuLine(y, COLOR_WHITE, "Reasserts:      %lu boot/%lu session (at %s%%)", led->reasserts, sessionReasserts, num);
+    }
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Reasserts:      %lu boot/%lu session", led->reasserts, sessionReasserts);
+    y = batteryMenuLine(y, led->writeFailures != 0 ? COLOR_RED : COLOR_WHITE, "LED writes:     %lu ok, %lu failed", led->writes,
+                        led->writeFailures);
+    // The error and the boot timings have their own lines (they shared one before)
+    if (led->error == BATTERY_LED_ERR_WRITE_FAILED)
+        y = batteryMenuLine(y, COLOR_RED, "LED error:      writes failed (0x%08lx), auto", (u32)led->lastWriteRes);
+    else if (led->error == BATTERY_LED_ERR_MCU_OVERRIDES)
+        y = batteryMenuLine(y, COLOR_RED, "LED error:      MCU keeps overriding, auto");
+    else if (led->writeFailures != 0)
+        y = batteryMenuLine(y, COLOR_RED, "LED error:      none (last fail 0x%08lx)", (u32)led->lastWriteRes);
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "LED error:      none");
+    // Boot timing (s since the tick counter started, ~power-on): Rosalina, SD usable, first MCU read, first LED write
+    char t0[16], t1[16];
+    batteryFormatBootS(t0, led->startMs);
+    batteryFormatBootS(t1, led->sdReadyMs);
+    y = batteryMenuLine(y, COLOR_WHITE, "Boot s:         Rosalina %s, SD %s", t0, t1);
+    batteryFormatBootS(t0, led->firstDataMs);
+    batteryFormatBootS(t1, led->firstWriteMs);
+    return batteryMenuLine(y, COLOR_WHITE, "First s:        MCU read %s, LED %s", t0, t1);
+}
+
+// Page 2: Sleep LED and the two ptm patches (sections 14, 15). Draw_Lock must be held.
+static u32 batteryDiagPtm(u32 y, const BatteryDiagData *d)
+{
+    const BatteryLedStatus *led = &d->led;
+    const BatteryPtmPatchStatus *ptm = &d->ptm;
+    const BatteryBarsStatus *bars = &d->bars;
+
+    y = batteryMenuLine(y, COLOR_WHITE, "Sleep setting:  %s", BatteryLedLogic_SleepSettingName(led->cfg.sleepMode));
+    if (led->sleepCount != 0)
+    {
+        // What the sleep hook wrote, and 0x29 read on wake before anything was written
+        char w[8], r[8];
+        batteryFormatSleepMode(w, led->sleepWrote, false, true);
+        batteryFormatSleepMode(r, led->wakeRead, led->wakePending, false);
+        y = batteryMenuLine(y, COLOR_WHITE, "Last sleep:     wrote %s / wake read %s, n=%lu", w, r, led->sleepCount);
+    }
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Last sleep:     none this boot");
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+
+    // ptm's sleep / wake LED bytes (section 14): "sleep 05 wake 05 (active)", "sleep 02 wake 00 (stock)", "off: ..."
+    y = batteryMenuLine(y, COLOR_WHITE, "Sleep / wake LED patch (ptm):");
+    const char *ptmName = BatteryPtmPatch_StateName(ptm->state, ptm->sleepCur, ptm->wakeCur);
+    if (ptm->state == BATTERY_PTM_STATE_OK)
+        y = batteryMenuLine(y, COLOR_WHITE, "  sleep %02lx wake %02lx (%s), writes %lu", (u32)ptm->sleepCur, (u32)ptm->wakeCur,
+                            ptmName, ptm->writes);
+    else if (ptm->state == BATTERY_PTM_STATE_NO_PTM || ptm->state == BATTERY_PTM_STATE_MAP_ERROR)
+        y = batteryMenuLine(y, COLOR_RED, "  %s 0x%08lx", ptmName, (u32)ptm->lastRes);
+    else if (ptm->state == BATTERY_PTM_STATE_OFF_TITLE)
+        y = batteryMenuLine(y, COLOR_RED, "  off: title id %08lx%08lx", (u32)(ptm->titleId >> 32), (u32)ptm->titleId);
+    else if (ptm->state == BATTERY_PTM_STATE_OFF_MISMATCH)
+        y = batteryMenuLine(y, COLOR_RED, "  off: mismatch (%s), both off",
+                            ptm->mismatch == (BATTERY_PTM_MISMATCH_SLEEP | BATTERY_PTM_MISMATCH_WAKE) ? "sleep+wake" :
+                            ptm->mismatch == BATTERY_PTM_MISMATCH_WAKE ? "wake" : "sleep");
+    else if (ptm->state == BATTERY_PTM_STATE_WRITE_ERROR)
+        y = batteryMenuLine(y, COLOR_RED, "  write error (want %02lx/%02lx), writes %lu", (u32)ptm->sleepWant, (u32)ptm->wakeWant,
+                            ptm->writes);
+    else
+        y = batteryMenuLine(y, ptm->state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "  %s, writes %lu", ptmName,
+                            ptm->writes);
+    y = batteryMenuLine(y, COLOR_WHITE, "  checks %lu", ptm->checks);
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+
+    // ptm battery bars (section 15): "fed L=3 (shared 3)", "fed L=3 (held), shared 3" (charging), "stock (off), shared 5",
+    // "off: ...". "shared" is ptm's level in the shared page (0x1FF81085 bits 2..4, read only), updated at ptm's own
+    // timer tick
+    y = batteryMenuLine(y, COLOR_WHITE, "HOME Menu bars patch (ptm):");
+    u32 shared = (OS_SharedConfig->led_battery >> 2) & 7;
+    if (bars->state == BATTERY_BARS_STATE_OK && bars->cmpCur == BATTERY_BARS_CMP_FED && led->barsReason == BATTERY_BARS_REASON_CHARGING)
+        y = batteryMenuLine(y, COLOR_WHITE, "  fed L=%lu (held), shared %lu, writes %lu", (u32)bars->movsCur, shared, bars->writes);
+    else if (bars->state == BATTERY_BARS_STATE_OK && bars->cmpCur == BATTERY_BARS_CMP_FED)
+        y = batteryMenuLine(y, COLOR_WHITE, "  fed L=%lu (shared %lu), writes %lu", (u32)bars->movsCur, shared, bars->writes);
+    else if (bars->state == BATTERY_BARS_STATE_OK)
+        y = batteryMenuLine(y, COLOR_WHITE, "  stock (%s), shared %lu, writes %lu", BatteryBars_ReasonName(led->barsReason), shared,
+                            bars->writes);
+    else if (bars->state == BATTERY_BARS_STATE_UNCHECKED)
+        y = batteryMenuLine(y, COLOR_WHITE, "  not checked yet, shared %lu", shared);
+    else if (bars->state == BATTERY_BARS_STATE_NO_PTM || bars->state == BATTERY_BARS_STATE_MAP_ERROR)
+        y = batteryMenuLine(y, COLOR_RED, "  %s 0x%08lx", BatteryBars_StateName(bars->state), (u32)bars->lastRes);
+    else if (bars->state == BATTERY_BARS_STATE_OFF_TITLE)
+        y = batteryMenuLine(y, COLOR_RED, "  off: title id %08lx%08lx", (u32)(bars->titleId >> 32), (u32)bars->titleId);
+    else if (bars->state == BATTERY_BARS_STATE_OFF_MISMATCH)
+        y = batteryMenuLine(y, COLOR_RED, "  off: mismatch (%s)",
+                            bars->mismatch == (BATTERY_BARS_MISMATCH_A | BATTERY_BARS_MISMATCH_B) ? "A+B" :
+                            bars->mismatch == BATTERY_BARS_MISMATCH_B ? "B" : "A");
+    else if (bars->state == BATTERY_BARS_STATE_WRITE_ERROR)
+        y = batteryMenuLine(y, COLOR_RED, "  write error (want L=%lu), writes %lu", (u32)bars->levelWant, bars->writes);
+    else
+        y = batteryMenuLine(y, COLOR_RED, "  %s", BatteryBars_StateName(bars->state));
+    if (led->barsLevel != BATTERY_BARS_STOCK)
+        y = batteryMenuLine(y, COLOR_WHITE, "  decided L=%lu (%s), checks %lu", (u32)led->barsLevel, BatteryBars_ReasonName(led->barsReason),
+                            bars->checks);
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "  decided stock (%s), checks %lu", BatteryBars_ReasonName(led->barsReason), bars->checks);
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+    // Title ID of the "ptm" process, read by either patch's check (0 until the first one); 0004013020002202 = New 3DS
+    u64 tid = ptm->titleId != 0 ? ptm->titleId : bars->titleId;
+    if (tid != 0)
+        y = batteryMenuLine(y, COLOR_WHITE, "ptm title ID:   %08lx%08lx", (u32)(tid >> 32), (u32)tid);
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "ptm title ID:   not read yet");
+    return y;
+}
+
+// Page 3: recorder and curve. Draw_Lock must be held; curve from BatteryCurve_Snapshot (taken before the lock).
+static u32 batteryDiagRecorderCurve(u32 y, const BatteryDiagData *d, const BatteryCurveFile *curve)
+{
+    const BatteryRecorderStatus *st = &d->st;
+    char dur[16];
+
+    BatteryMenu_FormatDuration(dur, st->elapsedMs);
+    if (st->recording)
+    {
+        y = batteryMenuLine(y, COLOR_WHITE, "Recorder:       recording #%04lu", (u32)st->number);
+        y = batteryMenuLine(y, COLOR_WHITE, "Elapsed:        %s", dur);
+        y = batteryMenuLine(y, COLOR_WHITE, "Samples:        %lu (%lu not on SD yet)", st->samples, st->bufferedLines);
+    }
+    else
+    {
+        y = batteryMenuLine(y, COLOR_WHITE, "Recorder:       idle");
+        if (st->number != 0 && st->recoveredNumber == st->number)
+            y = batteryMenuLine(y, COLOR_WHITE, "Last:           #%04lu (cut off, closed at boot)", (u32)st->number);
+        else if (st->number != 0)
+            y = batteryMenuLine(y, COLOR_WHITE, "Last:           #%04lu, %s, %lu samples", (u32)st->number, dur, st->samples);
+        else
+            y = batteryMenuLine(y, COLOR_WHITE, "Last:           none this boot");
+        y = batteryMenuLine(y, COLOR_WHITE, "");
+    }
+    // Sleep gap and errors have their own lines (they shared one before)
+    if (st->sleepGap)
+        y = batteryMenuLine(y, COLOR_RED, "Sleep gap:      yes, session invalid for curves");
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Sleep gap:      no");
+    y = batteryMenuLine(y, st->readErrors != 0 || st->writeErrors != 0 ? COLOR_RED : COLOR_WHITE,
+                        "Errors:         %lu read, %lu write (0x%08lx)", st->readErrors, st->writeErrors, (u32)st->lastWriteRes);
+    y = batteryMenuLine(y, COLOR_WHITE, "");
+
+    if (curve != NULL)
+    {
+        y = batteryMenuLine(y, COLOR_WHITE, "Curve:          %lu session%s, max spread %lu.%02lu", (u32)curve->numSessions,
+                            curve->numSessions == 1 ? "" : "s", (u32)curve->maxSpreadX100 / 100, (u32)curve->maxSpreadX100 % 100);
+        // Session numbers, 5 per line (16 at most: 4 lines)
+        for (u32 k = 0; k < curve->numSessions && k < BATTERY_CURVE_MAX_SESSIONS; k += 5)
+        {
+            char line[64];
+            int n = sprintf(line, k == 0 ? "Sessions:      " : "               ");
+            for (u32 j = k; j < k + 5 && j < curve->numSessions; j++)
+                n += sprintf(line + n, " #%04lu", (u32)curve->sessions[j]);
+            y = batteryMenuLine(y, COLOR_WHITE, "%s", line);
+        }
+        y = batteryMenuLine(y, curve->numOutliers != 0 ? COLOR_RED : COLOR_WHITE, "Outliers:       %lu (deviation > 5 points)",
+                            (u32)curve->numOutliers);
+    }
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Curve:          none loaded");
+    if (d->haveBak)
+        y = batteryMenuLine(y, COLOR_WHITE, "Backup:         curve.bak, %lu session%s", (u32)d->bakCount, d->bakCount == 1 ? "" : "s");
+    else
+        y = batteryMenuLine(y, COLOR_WHITE, "Backup:         none (no valid curve.bak)");
+    return y;
+}
+
 static void batteryMenuDiagnostics(void)
 {
+    BatteryDiagData *d = &g_diag;
+    u32 page = 0;
+
+    // curve.bak is only read here (an SD read), not on every refresh
+    d->haveBak = BatteryCurve_BackupInfo(&d->bakCount, NULL);
     batteryMenuClear();
 
-    do
+    while (!menuShouldExit)
     {
-        BatteryMcuSample s;
-        BatteryRecorderStatus st;
-        BatteryLedStatus led;
-        BatteryPtmPatchStatus ptm;
-        BatteryBarsStatus bars;
-        char dur[16], num[16], num2[16];
-
-        Result res = BatteryMcu_ReadSample(&s);
-        BatteryRecorder_GetStatus(&st);
-        BatteryLed_GetStatus(&led);
-        BatteryPtmPatch_GetStatus(&ptm);
-        BatteryBars_GetStatus(&bars);
+        char title[64];
+        d->res = BatteryMcu_ReadSample(&d->s);
+        BatteryRecorder_GetStatus(&d->st);
+        BatteryLed_GetStatus(&d->led);
+        BatteryPtmPatch_GetStatus(&d->ptm);
+        BatteryBars_GetStatus(&d->bars);
+        const BatteryCurveFile *curve = page == 2 ? BatteryCurve_Snapshot() : NULL;
+        BatteryDiag_Title(title, page);
 
         Draw_Lock();
-        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager - Diagnostics");
+        Draw_DrawFormattedString(10, 10, COLOR_TITLE, "%-*s", BATTERY_MENU_LINE_CHARS, title);
         u32 y = 30;
-
-        if (R_SUCCEEDED(res))
-        {
-            u32 p = BatteryMcu_PercentX10(s.pctInt, s.pctFrac);
-            u32 mv = BatteryMcu_VoltageMv(s.voltageRaw);
-            bool adapter = (s.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
-            bool charging = (s.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
-
-            y = batteryMenuLine(y, COLOR_WHITE, "MCU charge:     %lu.%lu%%", p / 10, p % 10);
-            // Same value the LED uses (median voltage); instantaneous voltage before the LED thread's first poll
-            float c = led.haveData ? led.corrected : BatteryCurve_Corrected(s.pctInt + s.pctFrac / 256.0f, (float)s.voltageRaw);
-            if (c >= 0.0f)
-            {
-                batteryFormatX10(num, c);
-                batteryFormatX10(num2, led.haveData ? led.voltSmoothed : (float)s.voltageRaw);
-                y = batteryMenuLine(y, COLOR_WHITE, "Corrected:      %s%%  (volt median %s)", num, num2);
-            }
-            else
-                y = batteryMenuLine(y, COLOR_WHITE, "Corrected:      no curve yet");
-            y = batteryMenuLine(y, COLOR_WHITE, "Voltage:        %lu.%03luV (raw %lu)", mv / 1000, mv % 1000, (u32)s.voltageRaw);
-            // Same unit and rounding as the Rosalina footer (menu.c)
-            bool fahrenheit = (lumaMcuConfig.flags & MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT) != 0;
-            u32 temp = fahrenheit ? (9 * (u32)s.temperature + 2) / 5 + 32 : (u32)s.temperature;
-            y = batteryMenuLine(y, COLOR_WHITE, "Temp: %lu\xF8%c  Adapter: %s  Charging: %s", temp, fahrenheit ? 'F' : 'C',
-                                adapter ? "yes" : "no", charging ? "yes" : "no");
-            if (s.infoValid)
-                y = batteryMenuLine(y, COLOR_WHITE, "Vendor: %lu  RCOMP: 0x%02lx  MGIC: %lu.%lu",
-                                    (u32)s.info[2], (u32)s.info[5], (u32)s.info[3], (u32)s.info[4]);
-            else
-                y = batteryMenuLine(y, COLOR_WHITE, "Info table (0x7F) unavailable");
-        }
+        if (page == 0)
+            y = batteryDiagGaugeLed(y, d);
+        else if (page == 1)
+            y = batteryDiagPtm(y, d);
         else
-        {
-            y = batteryMenuLine(y, COLOR_RED, "MCU read failed (0x%08lx).", (u32)res);
-            for (u32 i = 0; i < 4; i++)
-                y = batteryMenuLine(y, COLOR_WHITE, "");
-        }
-
-        // LED control
-        if (led.reason == BATTERY_LED_REASON_OFF)
-            y = batteryMenuLine(y, COLOR_WHITE, "LED control:    OFF%s", led.fastPolling ? "  (fast poll)" : "");
-        else
-            y = batteryMenuLine(y, led.cfg.override ? COLOR_GREEN : COLOR_WHITE, "LED control:    %s  (%s%s)",
-                                led.cfg.override ? "ON" : "OFF", BatteryLedLogic_ReasonName(led.reason),
-                                led.fastPolling ? ", fast poll" : "");
-        if (R_SUCCEEDED(res) && s.ledModeValid)
-            y = batteryMenuLine(y, COLOR_WHITE, "LED desired:    %-9s actual(0x29): %lu",
-                                BatteryLedLogic_ModeName(led.desired), (u32)s.ledMode);
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "LED desired:    %-9s actual(0x29): ?", BatteryLedLogic_ModeName(led.desired));
-        if (R_SUCCEEDED(res) && s.infoValid)
-            y = batteryMenuLine(y, COLOR_WHITE, "Red LED: %-3s  Blue: %-3lu  Written: %s",
-                                s.info[0x0A] ? "on" : "off", (u32)s.info[0x0B], BatteryLedLogic_ModeName(led.lastWritten));
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "Red LED: ?    Blue: ?    Written: %s", BatteryLedLogic_ModeName(led.lastWritten));
-        u32 sessionReasserts = st.recording ? led.reasserts - st.reassertBase : 0;
-        if (led.haveMismatch)
-        {
-            batteryFormatX10(num, led.lastMismatchPct);
-            y = batteryMenuLine(y, COLOR_WHITE, "Reasserts:      %lu boot/%lu session (at %s%%)", led.reasserts, sessionReasserts, num);
-        }
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "Reasserts:      %lu boot/%lu session", led.reasserts, sessionReasserts);
-        if (led.sleepCount != 0)
-        {
-            // What the sleep hook wrote, and 0x29 read on wake before anything was written
-            char w[8], r[8];
-            batteryFormatSleepMode(w, led.sleepWrote, false, true);
-            batteryFormatSleepMode(r, led.wakeRead, led.wakePending, false);
-            y = batteryMenuLine(y, COLOR_WHITE, "Sleep: wrote %s / wake read %s (n=%lu)", w, r, led.sleepCount);
-        }
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "Sleep: setting %s, no sleep yet", BatteryLedLogic_SleepSettingName(led.cfg.sleepMode));
-        // ptm's sleep / wake LED bytes (section 14): "sleep 05 wake 05 (active)", "sleep 02 wake 00 (stock)", "off: ..."
-        const char *ptmName = BatteryPtmPatch_StateName(ptm.state, ptm.sleepCur, ptm.wakeCur);
-        if (ptm.state == BATTERY_PTM_STATE_OK)
-            y = batteryMenuLine(y, COLOR_WHITE, "ptm patch: sleep %02lx wake %02lx (%s), writes %lu", (u32)ptm.sleepCur,
-                                (u32)ptm.wakeCur, ptmName, ptm.writes);
-        else if (ptm.state == BATTERY_PTM_STATE_NO_PTM || ptm.state == BATTERY_PTM_STATE_MAP_ERROR)
-            y = batteryMenuLine(y, COLOR_RED, "ptm patch: %s 0x%08lx", ptmName, (u32)ptm.lastRes);
-        else if (ptm.state == BATTERY_PTM_STATE_OFF_TITLE)
-            y = batteryMenuLine(y, COLOR_RED, "ptm patch: off: title id %08lx%08lx", (u32)(ptm.titleId >> 32), (u32)ptm.titleId);
-        else if (ptm.state == BATTERY_PTM_STATE_OFF_MISMATCH)
-            y = batteryMenuLine(y, COLOR_RED, "ptm patch: off: mismatch (%s), both off",
-                                ptm.mismatch == (BATTERY_PTM_MISMATCH_SLEEP | BATTERY_PTM_MISMATCH_WAKE) ? "sleep+wake" :
-                                ptm.mismatch == BATTERY_PTM_MISMATCH_WAKE ? "wake" : "sleep");
-        else if (ptm.state == BATTERY_PTM_STATE_WRITE_ERROR)
-            y = batteryMenuLine(y, COLOR_RED, "ptm patch: write error (want %02lx/%02lx), writes %lu", (u32)ptm.sleepWant,
-                                (u32)ptm.wakeWant, ptm.writes);
-        else
-            y = batteryMenuLine(y, ptm.state == BATTERY_PTM_STATE_UNCHECKED ? COLOR_WHITE : COLOR_RED, "ptm patch: %s, writes %lu",
-                                ptmName, ptm.writes);
-        // ptm battery bars (section 15): "fed L=3 (shared 3)", "fed L=3 (held), shared 3" (charging), "stock (off), shared 5, w 6",
-        // "off: ...", each at most 49 chars (BATTERY_MENU_LINE_CHARS) with up to 4-digit write counts. "shared" is
-        // ptm's level in the shared page (0x1FF81085 bits 2..4, read only), updated at ptm's own timer tick
-        u32 shared = (OS_SharedConfig->led_battery >> 2) & 7;
-        if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED && led.barsReason == BATTERY_BARS_REASON_CHARGING)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (held), shared %lu, writes %lu", (u32)bars.movsCur, shared, bars.writes);
-        else if (bars.state == BATTERY_BARS_STATE_OK && bars.cmpCur == BATTERY_BARS_CMP_FED)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: fed L=%lu (shared %lu), writes %lu", (u32)bars.movsCur, shared, bars.writes);
-        else if (bars.state == BATTERY_BARS_STATE_OK)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: stock (%s), shared %lu, w %lu",
-                                BatteryBars_ReasonName(led.barsReason), shared, bars.writes);
-        else if (bars.state == BATTERY_BARS_STATE_UNCHECKED)
-            y = batteryMenuLine(y, COLOR_WHITE, "bars patch: not checked yet, shared %lu", shared);
-        else if (bars.state == BATTERY_BARS_STATE_NO_PTM || bars.state == BATTERY_BARS_STATE_MAP_ERROR)
-            y = batteryMenuLine(y, COLOR_RED, "bars patch: %s 0x%08lx", BatteryBars_StateName(bars.state), (u32)bars.lastRes);
-        else if (bars.state == BATTERY_BARS_STATE_OFF_TITLE)
-            y = batteryMenuLine(y, COLOR_RED, "bars patch: off: title id %08lx%08lx", (u32)(bars.titleId >> 32), (u32)bars.titleId);
-        else if (bars.state == BATTERY_BARS_STATE_OFF_MISMATCH)
-            y = batteryMenuLine(y, COLOR_RED, "bars patch: off: mismatch (%s)",
-                                bars.mismatch == (BATTERY_BARS_MISMATCH_A | BATTERY_BARS_MISMATCH_B) ? "A+B" :
-                                bars.mismatch == BATTERY_BARS_MISMATCH_B ? "B" : "A");
-        else if (bars.state == BATTERY_BARS_STATE_WRITE_ERROR)
-            y = batteryMenuLine(y, COLOR_RED, "bars patch: write error (want L=%lu), writes %lu", (u32)bars.levelWant, bars.writes);
-        else
-            y = batteryMenuLine(y, COLOR_RED, "bars patch: %s", BatteryBars_StateName(bars.state));
-        if (led.error == BATTERY_LED_ERR_WRITE_FAILED)
-            y = batteryMenuLine(y, COLOR_RED, "LED: writes failed (0x%08lx), automatic", (u32)led.lastWriteRes);
-        else if (led.error == BATTERY_LED_ERR_MCU_OVERRIDES)
-            y = batteryMenuLine(y, COLOR_RED, "LED: MCU keeps overriding, automatic");
-        else if (led.writeFailures != 0)
-            y = batteryMenuLine(y, COLOR_RED, "LED write failures: %lu (0x%08lx)", led.writeFailures, (u32)led.lastWriteRes);
-        else if (led.firstWriteMs != 0 || led.firstDataMs != 0)
-        {
-            // Boot timing (s since the tick counter started, ~power-on): Rosalina, SD usable, first write
-            char t0[16], t1[16], t2[16];
-            batteryFormatX10(t0, led.startMs / 1000.0f);
-            batteryFormatX10(t1, led.sdReadyMs / 1000.0f);
-            if (led.firstWriteMs != 0)
-                batteryFormatX10(t2, led.firstWriteMs / 1000.0f);
-            else
-                memcpy(t2, "-", 2);
-            y = batteryMenuLine(y, COLOR_WHITE, "Boot s: Rosalina %s SD %s 1st LED %s", t0, t1, t2);
-        }
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "");
-
-        batteryFormatDuration(dur, st.elapsedMs);
-        if (st.recording)
-        {
-            y = batteryMenuLine(y, COLOR_WHITE, "Recorder:       recording #%04lu", (u32)st.number);
-            y = batteryMenuLine(y, COLOR_WHITE, "Elapsed:        %s", dur);
-            y = batteryMenuLine(y, COLOR_WHITE, "Samples:        %lu (%lu not on SD yet)", st.samples, st.bufferedLines);
-        }
-        else
-        {
-            y = batteryMenuLine(y, COLOR_WHITE, "Recorder:       idle");
-            if (st.number != 0 && st.recoveredNumber == st.number)
-                y = batteryMenuLine(y, COLOR_WHITE, "Last:           #%04lu (cut off, closed at boot)", (u32)st.number);
-            else if (st.number != 0)
-                y = batteryMenuLine(y, COLOR_WHITE, "Last:           #%04lu, %s, %lu samples", (u32)st.number, dur, st.samples);
-            else
-                y = batteryMenuLine(y, COLOR_WHITE, "");
-            y = batteryMenuLine(y, COLOR_WHITE, "");
-        }
-
-        if (st.sleepGap)
-            y = batteryMenuLine(y, COLOR_RED, "Sleep gap seen: session invalid for curves");
-        else if (st.readErrors != 0 || st.writeErrors != 0)
-            y = batteryMenuLine(y, COLOR_RED, "Errors: %lu read, %lu write (0x%08lx)", st.readErrors, st.writeErrors, (u32)st.lastWriteRes);
-        else
-            y = batteryMenuLine(y, COLOR_WHITE, "");
-
-        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Press B to go back.");
+            y = batteryDiagRecorderCurve(y, d, curve);
+        batteryMenuPadBody(y);
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "Left/Right or L/R: page  B: back");
         Draw_FlushFramebuffer();
         Draw_Unlock();
+
+        u32 pressed = waitInputWithTimeout(1000);
+        if (pressed & KEY_B)
+            break;
+        else if (pressed & (KEY_RIGHT | KEY_R))
+            page = (page + 1) % BATTERY_DIAG_PAGES;
+        else if (pressed & (KEY_LEFT | KEY_L))
+            page = (page + BATTERY_DIAG_PAGES - 1) % BATTERY_DIAG_PAGES;
     }
-    while (!(waitInputWithTimeout(1000) & KEY_B) && !menuShouldExit);
+    batteryMenuClear();
 }
 
 // ---- Recording ----
@@ -417,7 +544,7 @@ static bool batteryRecordingTitleRefresh(void)
     if (st.recording)
     {
         char dur[16];
-        batteryFormatDuration(dur, st.elapsedMs);
+        BatteryMenu_FormatDuration(dur, st.elapsedMs);
         sprintf(title, "Stop recording  #%04lu  %s", (u32)st.number, dur);
     }
     else
@@ -501,7 +628,7 @@ static void batteryStopRecording(const BatteryRecorderStatus *st)
     char line[64], dur[16];
     u16 number = 0;
 
-    batteryFormatDuration(dur, st->elapsedMs);
+    BatteryMenu_FormatDuration(dur, st->elapsedMs);
     batteryTextBegin();
     batteryTextAdd(COLOR_WHITE, "Stop recording session #%04lu (%s)?", (u32)st->number, dur);
     batteryTextAdd(COLOR_WHITE, "");
@@ -592,7 +719,7 @@ static void batterySessionDetails(const BatterySessionInfo *info, bool inCurve, 
 {
     char dur[16];
     char title[48];
-    batteryFormatDuration(dur, info->durationMs);
+    BatteryMenu_FormatDuration(dur, info->durationMs);
     sprintf(title, "Battery Manager - Session #%04lu", (u32)info->number);
 
     batteryTextBegin();
@@ -1422,7 +1549,7 @@ static void batteryMenuSetupGuide(void)
     if (st.recording)
     {
         char dur[16];
-        batteryFormatDuration(dur, st.elapsedMs);
+        BatteryMenu_FormatDuration(dur, st.elapsedMs);
         batteryTextAdd(COLOR_WHITE, "");
         batteryTextAdd(COLOR_TITLE, "Recording session #%04lu (%s).", (u32)st.number, dur);
     }
@@ -1540,4 +1667,146 @@ static void batteryMenuLedTest(void)
 
     BatteryLed_TestEnd();
     batteryMenuClear();
+}
+
+// ---- Home screen ----
+
+typedef struct BatteryHomeData
+{
+    BatteryHomeInputs in;
+    BatteryHomeLine lines[BATTERY_HOME_SUMMARY_LINES];
+    BatteryMcuSample s;
+    BatteryRecorderStatus st;
+    BatteryLedStatus led;
+    BatteryPtmPatchStatus ptm;
+    BatteryBarsStatus bars;
+} BatteryHomeData;
+
+static BatteryHomeData g_home; // menu thread only (static: keeps the stack small under the nested menuShow)
+
+static u8 batteryHomePatchState(u8 state)
+{
+    // BATTERY_PTM_STATE_* and BATTERY_BARS_STATE_* share UNCHECKED = 0 and OK = 1
+    return state == BATTERY_PTM_STATE_OK ? BATTERY_HOME_PATCH_OK :
+           state == BATTERY_PTM_STATE_UNCHECKED ? BATTERY_HOME_PATCH_UNCHECKED : BATTERY_HOME_PATCH_UNAVAILABLE;
+}
+
+_Static_assert(BATTERY_PTM_STATE_UNCHECKED == 0 && BATTERY_BARS_STATE_UNCHECKED == 0 && BATTERY_PTM_STATE_OK == 1 &&
+               BATTERY_BARS_STATE_OK == 1, "batteryHomePatchState maps both patch states the same way");
+
+// Reads the live state (MCU read, status getters, curve snapshot): the same sources as Diagnostics, nothing written
+static void batteryHomeGather(BatteryHomeData *h, bool *haveVoltTemp)
+{
+    BatteryHomeInputs *in = &h->in;
+    memset(in, 0, sizeof(*in));
+
+    Result res = BatteryMcu_ReadSample(&h->s);
+    BatteryRecorder_GetStatus(&h->st);
+    BatteryLed_GetStatus(&h->led);
+    BatteryLed_GetConfig(&in->cfg);
+    BatteryPtmPatch_GetStatus(&h->ptm);
+    BatteryBars_GetStatus(&h->bars);
+    const BatteryCurveFile *curve = BatteryCurve_Snapshot();
+
+    in->haveSample = R_SUCCEEDED(res);
+    *haveVoltTemp = in->haveSample;
+    if (in->haveSample)
+    {
+        in->pctX10 = BatteryMcu_PercentX10(h->s.pctInt, h->s.pctFrac);
+        in->adapter = (h->s.flags & BATTERY_MCU_FLAG_ADAPTER) != 0;
+        in->charging = (h->s.flags & BATTERY_MCU_FLAG_CHARGING) != 0;
+    }
+    // Same corrected % as Diagnostics and the footer: the LED's (median voltage), instantaneous before its first poll
+    if (h->led.haveData)
+        in->corrected = h->led.corrected;
+    else
+        in->corrected = in->haveSample ? BatteryCurve_Corrected(h->s.pctInt + h->s.pctFrac / 256.0f, (float)h->s.voltageRaw) : -1.0f;
+    in->ledReason = h->led.reason;
+    in->ledDesired = h->led.desired;
+    in->ledError = h->led.error;
+    in->barsLevel = h->led.barsLevel;
+    in->barsReason = h->led.barsReason;
+    in->barsPatch = batteryHomePatchState(h->bars.state);
+    in->sleepPatch = batteryHomePatchState(h->ptm.state);
+    in->haveCurve = curve != NULL;
+    in->curveSessions = curve != NULL ? curve->numSessions : 0;
+    in->recording = h->st.recording;
+    in->recNumber = h->st.number;
+    in->recElapsedMs = h->st.elapsedMs;
+    in->recSleepGap = h->st.sleepGap;
+    in->recErrors = h->st.readErrors != 0 || h->st.writeErrors != 0;
+}
+
+static u32 batteryToneColor(u8 tone)
+{
+    return tone == BATTERY_TONE_ERROR ? COLOR_RED : tone == BATTERY_TONE_INACTIVE ? COLOR_TITLE : COLOR_WHITE;
+}
+
+// Rosalina > Battery Manager...: live summary (refreshed every second), a "Next:" hint and the four entries. Up/Down
+// select, A opens, B goes back, like a Rosalina menu. Settings and Setup guide are called directly; Learning... and
+// Advanced... are opened with menuShow, so they behave exactly like before (same items, dynamic recording title, footer).
+// Layout (fixed rows, every one padded, so the 1 s redraw leaves no residue): 7 summary rows, blank, 2 hint rows,
+// blank, 4 entries; 15 of the 17 body lines.
+void BatteryMenu_Home(void)
+{
+    BatteryHomeData *h = &g_home;
+    u32 selected = 0;
+
+    BatteryLed_EnsureConfigLoaded(); // read only: config.ini once, like Settings
+    batteryMenuClear();
+
+    while (!menuShouldExit)
+    {
+        bool haveVoltTemp;
+        char voltTemp[16];
+        const char *next1, *next2;
+
+        batteryHomeGather(h, &haveVoltTemp);
+        BatteryHome_Summary(&h->in, h->lines);
+        u8 step = BatteryHome_NextStep(&h->in);
+        BatteryHome_NextText(step, &next1, &next2);
+        bool fahrenheit = (lumaMcuConfig.flags & MCUCFG_FLAG_TEMPERATURE_IN_FAHRENHEIT) != 0;
+        if (haveVoltTemp)
+            BatteryMenu_FormatVoltTemp(voltTemp, h->s.voltageRaw, h->s.temperature, fahrenheit);
+        else
+            voltTemp[0] = 0;
+
+        Draw_Lock();
+        Draw_DrawString(10, 10, COLOR_TITLE, "Battery Manager");
+        u32 y = 30;
+        for (u32 i = 0; i < BATTERY_HOME_SUMMARY_LINES; i++)
+            y = batteryMenuLine(y, batteryToneColor(h->lines[i].tone), "%s", h->lines[i].text);
+        y = batteryMenuLine(y, COLOR_WHITE, "");
+        u32 nextColor = step == BATTERY_NEXT_ERROR ? COLOR_RED : COLOR_TITLE;
+        y = batteryMenuLine(y, nextColor, "%s", next1);
+        y = batteryMenuLine(y, nextColor, "%s", next2);
+        y = batteryMenuLine(y, COLOR_WHITE, "");
+        // Entries drawn like menuDraw: cursor at x = 10 in the title colour, title at x = 30 (46 chars)
+        for (u32 i = 0; i < BATTERY_HOME_ENTRIES; i++)
+        {
+            Draw_DrawCharacter(10, y, COLOR_TITLE, i == selected ? '>' : ' ');
+            Draw_DrawFormattedString(30, y, COLOR_WHITE, "%-*s", BATTERY_MENU_LINE_CHARS - 3, g_homeEntries[i].title);
+            y += SPACING_Y;
+        }
+        batteryMenuPadBody(y);
+        Draw_DrawString(10, SCREEN_BOT_HEIGHT - 20, COLOR_TITLE, "A: open  B: back");
+        // Voltage (footer scale, raw x 0.02) and temperature, right-aligned in a fixed 11-char field like the footer
+        Draw_DrawFormattedString(SCREEN_BOT_WIDTH - 10 - SPACING_X * 11, SCREEN_BOT_HEIGHT - 20, COLOR_WHITE, "%11s", voltTemp);
+        Draw_FlushFramebuffer();
+        Draw_Unlock();
+
+        u32 pressed = waitInputWithTimeout(1000);
+        if (pressed & KEY_B)
+            break;
+        else if (pressed & KEY_DOWN)
+            selected = (selected + 1) % BATTERY_HOME_ENTRIES;
+        else if (pressed & KEY_UP)
+            selected = (selected + BATTERY_HOME_ENTRIES - 1) % BATTERY_HOME_ENTRIES;
+        else if (pressed & KEY_A)
+        {
+            batteryMenuClear();
+            g_homeEntries[selected].open();
+            batteryMenuClear();
+        }
+    }
 }
