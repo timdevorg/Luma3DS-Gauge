@@ -5,6 +5,12 @@ Status: **host prototype and validation only, no console code.** Prototype:
 Background: [`battery-manager.md`](battery-manager.md), sections 5 (recording guide), 11 (curve
 builder), 12 (LED control) and 17 (time remaining).
 
+**Decision for v13.5-gauge.1: not built on the console.** It is not worth it for now. It needs tens of
+hours of stints before it beats the prior. The heavy-load session 0004 (battery-manager.md 11.8)
+also answers 6.7 step 2: the MCU % → real % curve itself shifts with load, by ~6–7 points below stock
+50 %. Stints at mixed loads would therefore mix curves. The console keeps Build curve from full
+discharges. This document and the prototype stay as the basis if it is picked up again.
+
 **In short.** A random-effects fit (one load factor per play stint, shrunk towards a common load;
 19 MCU blocks; exact least squares; the existing curve as prior) recovers the curve from partial
 play, but slowly: from scratch it needs ~32–64 h of play (4–9 battery cycles) plus one run to
@@ -472,7 +478,8 @@ SD changes; `stints.bin` and `curve.base` are new files.
    trim; checks 2.5 / 2.6).
 2. A light and a heavy full session (section 5's open question): does the MCU % → real % curve
    itself shift with load? If yes by more than ~2 points, passive learning mixes curves and
-   should weight by load or keep separate curves.
+   should weight by load or keep separate curves. *Done (battery-manager.md 11.8): yes, ~6–7 points
+   below stock 50 % at full 3D vs 3D off.*
 3. Run passive.py on those CSVs against the current curve.bin and compare with Build curve.
 
 ### 6.8 Effort estimate (console)

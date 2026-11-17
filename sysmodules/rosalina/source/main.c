@@ -141,7 +141,7 @@ static void handleTermNotification(u32 notificationId)
 
 static void handleSleepNotification(u32 notificationId)
 {
-    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED back to automatic before sleep
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: sleep: sleep LED mode + ptm bytes, before the ack; wake: re-apply
     ptmSysmInit();
     s32 ackValue = ptmSysmGetNotificationAckValue(notificationId);
     switch (notificationId)
@@ -170,7 +170,7 @@ static void handleShellNotification(u32 notificationId)
 {
     // Quick dirty fix
     Sleep__HandleNotification(notificationId);
-    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED (lid closed / opened)
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: lid closed: sleep LED mode + ptm bytes; opened: re-apply
 
     if (notificationId == 0x213) {
         // Shell opened
@@ -189,7 +189,7 @@ static void handleShellNotification(u32 notificationId)
 static void handlePreTermNotification(u32 notificationId)
 {
     (void)notificationId;
-    BatteryLed_HandleNotification(notificationId); // Battery Manager: power LED back to automatic first
+    BatteryLed_HandleNotification(notificationId); // Battery Manager: "power off" LED mode (3) once if we own the LED, then no writes
     // Might be subject to a race condition, but heh.
 
     miniSocUnlockState(true);

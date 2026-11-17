@@ -22,7 +22,13 @@ red only appear when the battery is actually low.
 > screen, Learning and Advanced submenus, confirmations, `curve.bak`); UI only, **tested on hardware**. The home
 > screen with a live summary and the paged Diagnostics (16.11–16.15) are **tested on hardware (2026-11-16)**.
 > [Section 17](#17-time-remaining) adds a time-remaining estimate ("Time left" on the home screen) from the corrected
-> % over the last 30 minutes; read-only, **not yet tested on hardware**.
+> % over the last 30 minutes; read-only, **tested on hardware**, including the provisional `~3h 10m?` after a wake
+> (17.7). Settings > Y (reset to defaults), the `config.ini` report and Diagnostics 4/4 (16.16) are **tested on
+> hardware** too.
+> [Section 18](#18-release-v135-gauge1-fix-batch-and-final-validation) lists the fixes made before the release
+> v13.5-gauge.1 (all **tested on hardware**), the overall test status and the limits accepted for the release; the
+> heavy-load validation (session 0004) is in [11.8](#118-heavy-load-validation-session-0004).
+> **Release v13.5-gauge.1: every feature in this document is tested on the real console (one New 3DS XL).**
 >
 > AI disclosure: this document was written with the help of AI (Claude Code) and reviewed
 > by the maintainer. See [README – AI disclosure](../README.md#ai-disclosure).
@@ -155,14 +161,20 @@ the LED back.
 - A background **thread inside Rosalina** (always running, already has
   `mcu::HWC` access). The menu only controls it.
 - Code lives in `sysmodules/rosalina/source/battery/` and `include/battery/`.
-  Upstream files get minimal changes: one menu entry and one thread start.
-  This keeps rebasing onto new Luma releases easy.
+  Upstream files get small changes (`git diff --stat v13.5..HEAD`): `source/main.c` (the recorder and LED
+  thread starts and joins, one `BatteryLed_HandleNotification()` call in each of the sleep, shell and
+  pre-termination handlers, three notification table entries), `source/menus.c` (one menu entry), `source/menu.c`
+  (the footer: integer voltage and `stock%→corrected%`, 16.6 / 16.13) and the Rosalina `Makefile`
+  (`source/battery` in `SOURCES`). This keeps rebasing onto new Luma releases easy.
 - Files on SD:
   - `/luma/battery/config.ini`: LED settings ([section 12.6](#126-settings-lumabatteryconfigini))
   - `/luma/battery/sessions/NNNN.csv`: one file per recorded discharge
   - `/luma/battery/curve.bin`: built curve (161-point MCU table + 81-point voltage table, [section 11](#11-curve-builder--graph-milestone-3))
   - `/luma/battery/curve.bak`: the previous curve (same format), kept by Build curve and Restore previous curve ([16.4](#164-curvebak-and-restore-previous-curve))
   - `/luma/battery/curve_select.ini`: which sessions the curve builder uses
+  - `/luma/battery/state`: the recorder's state (9.2), for the cut-off recovery at boot
+  - `/luma/battery/last_session` (and `last_session.tmp`): the highest session number ever used, so a number is
+    never reused (9.2, section 18)
   - `/luma/battery/config.tmp`, `curve.tmp`: short-lived temporary files for the safe write of `config.ini` /
     `curve.bin` (12.6, 11.4, 16.4); the loader falls back to them after a power cut
 
@@ -242,7 +254,8 @@ Original plan below; the implementation is described in [section 12](#12-led-con
 
 - Corrected % in the Rosalina menu header.
 - Corrected HOME Menu battery icon (patch/hook `ptm` battery level). This is harder.
-- Load-aware curve (brightness, 3D, wifi). Only if the data shows load matters.
+- Load-aware curve (brightness, 3D, wifi). Only if the data shows load matters. *It does (11.8: about 6–7 points
+  below stock 50 % at full 3D); not implemented, the curve is kept from light play.*
 
 ---
 
@@ -254,17 +267,23 @@ Original plan below; the implementation is described in [section 12](#12-led-con
 - **No sleep** (don't close the lid) and no charger. Keep it at room temperature.
 - Run until the console shuts itself off.
 - Record 2–3 sessions. Optionally do light / normal / heavy sessions to see,
-  from the graph's spread band, whether load matters.
+  from the graph's spread band, whether load matters. It does (11.8): build the curve from sessions at the load
+  you normally play at.
 
 ---
 
 ## 6. Open questions (to answer with the logger)
 
-- [ ] Does the MCU re-assert the red LED after `0x29 = 5`? When (10/5/0 %, wake, charger)?
-  Milestone 4 counts re-asserts (Status, CSV v2 `reasserts`); needs a session with the override on.
-- [ ] Does `0x29` survive sleep / wake? (We hand back to automatic before sleep anyway.)
-- [ ] Does reading `0x29` return the mode that was written? (Status / LED test show the read-back.)
-- [ ] Which blue mode does the MCU respect better, `5` or `1`?
+- [x] Does the MCU re-assert the red LED after `0x29 = 5`? When (10/5/0 %, wake, charger)?
+  **Answered: no.** The override at MCU 2.9 % stayed blue with 0 re-asserts (13.1), and session 0004 (override on,
+  through the MCU's 10 / 5 / 1 % events to shutdown) ended with `reasserts` 0 (11.8). What does take the LED is
+  ptm at sleep and wake (next question).
+- [x] Does `0x29` survive sleep / wake? **Answered (13.2, 14.1):** it doesn't matter as asked: ptm itself sends
+  mode 2 before sleep and 0 on wake (mcu::RTC `0x2E` SetPowerLedState), over whatever was written. Section 14
+  patches those two bytes. (Automatic is no longer written before sleep, 13.2.)
+- [x] Does reading `0x29` return the mode that was written? **Yes (13.1)**, for every mode.
+- [x] Which blue mode does the MCU respect better, `5` or `1`? **Both are kept (13.1).** They differ in
+  brightness only: 1 follows `0x28`, 5 is full brightness (13.10, 13.11).
 - [x] At what MCU % / voltage does the console actually shut down?
   **MCU 1.0 %, `volt_raw` 155** (3.03 V at 5/256, 3.10 V at 0.02), session 0001.
 - [x] Does `0x7F[0x0A]` track the red LED? **Yes**: 0 while blue, 1 when solid red, toggles
@@ -274,7 +293,8 @@ Original plan below; the implementation is described in [section 12](#12-led-con
 - [ ] Voltage scale: 5/256 or 5.12/256? Still open (needs a multimeter reading). Diagnostics shows both, user
   screens use 0.02 (16.13).
 - [ ] What is `0x7F[5]` (RCOMP?) on this console?
-- [ ] How wide is the spread between light / normal / heavy sessions?
+- [x] How wide is the spread between light / normal / heavy sessions? **Answered (11.8):** sessions 0001 / 0002
+  (light) agree within 1.6 points; at full 3D (0004) about 6–7 points less real charge below stock 50 %.
 
 ## 7. Milestones
 
@@ -291,6 +311,8 @@ Original plan below; the implementation is described in [section 12](#12-led-con
    wake LED patch: section 14 (blue during sleep tested on hardware, 13.10).
    HOME Menu battery bars from the corrected % (ptm patch): section 15 (milestone 5, tested on hardware).
 5. Optional extras (4.6). Document findings on 3dbrew.
+6. **Release v13.5-gauge.1**: fix batch, heavy-load validation, final hardware test. *Done, tested on hardware.*
+   See section 18.
 
 ## 8. Sources
 
@@ -317,7 +339,8 @@ one menu entry in `menus.c` ("Battery Manager..." after "System configuration...
 and the thread start + join in `main.c`.
 
 - **Thread**: `MyThread_Create`, static 4 KiB stack, priority 58 (same as the task runner,
-  the lowest of Rosalina's threads), `CORE_SYSTEM`. It waits 5 s after boot, then wakes up
+  the lowest of Rosalina's threads), `CORE_SYSTEM`. At boot it waits until the SD card can be opened
+  (`BatteryFs_SdReady()`, checked every 200 ms, at most 30 s; originally a fixed 5 s, 13.4), then wakes up
   every 1 s (waiting on Rosalina's sticky `preTerminationEvent`) and takes a sample every 10 s
   while recording.
 - **`mcu::HWC` access**: same pattern as `menuUpdateMcuInfo()` (get a session, steal one with
@@ -334,7 +357,11 @@ and the thread start + join in `main.c`.
 
 All under `/luma/battery/` on the SD card (created when recording starts).
 
-**`sessions/NNNN.csv`**: one per session; `NNNN` = highest existing number + 1.
+**`sessions/NNNN.csv`**: one per session; `NNNN` = 1 + the highest number ever used: the maximum of the CSV
+files on SD, `/luma/battery/last_session` (`last=NNNN`, written power-cut safe before each new CSV; its `.tmp` is
+read too) and the sessions in the loaded curve. So a deleted session's number is never reused, and a new
+recording can't inherit an old session's `curve_select.ini` entry or "in curve" mark (section 18). Without the
+counter file (an SD from before) this is the old "highest existing + 1".
 
 Recorder v2 (milestone 4) appends four LED columns to the sample rows; see the end of this section.
 
@@ -396,8 +423,12 @@ End lines:
 | `cutoff` | written at the next boot when the state file still says `recording=NNNN` and the CSV has no end line (power was lost without notice) |
 
 **`state`**: `recording=NNNN` while recording, `recording=none` otherwise. Written at
-start, and set back to `none` after the end line is written. At boot (5 s after Rosalina
-starts) a leftover `recording=NNNN` closes that session as `cutoff`.
+start, and set back to `none` after the end line is written. At boot (as soon as the SD card can be opened,
+13.4) a leftover `recording=NNNN` closes that session as `cutoff`.
+If the end line itself can't be written (SD error), the state is **not** set to `none`: the recorder retries every
+10 s and before the next start (which is refused while it fails), and writes `ending=NNNN reason=R` if that small
+write works, so the boot recovery writes the real reason instead of `cutoff`. If the sample buffer has to be
+dropped because the SD keeps failing, the CSV gets a `# lost lines=<n>` comment (skipped by every parser).
 Recording **never** resumes automatically after boot.
 
 ### 9.3 Session classification (Sessions list)
@@ -440,14 +471,18 @@ Testing via `x_gauge.firm` first is safer: a plain boot still starts the old `bo
 
 ### 9.5 To verify on hardware
 
-- [ ] Status screen values match the Rosalina menu footer (%, voltage, temperature).
+All checked on hardware (New 3DS XL) for the release v13.5-gauge.1.
+
+- [x] Status screen values match the Rosalina menu footer (%, voltage, temperature).
 - [x] `0x7F[0x0A]` really follows the red LED (session 0001).
-- [x] `# end reason=shutdown` appears after the console powers itself off at 0 % (session 0001).
-- [ ] `# end reason=shutdown` after a normal (manual) power-off.
-- [ ] `cutoff` recovery works after pulling the battery (or holding power).
-- [ ] Sleep (closing the lid) produces a `# sleep gap=` line (does `svcGetSystemTick` stop during sleep? the wall clock is used as a fallback).
-- [ ] Charger plug-in ends the session.
-- [ ] No noticeable effect on games (thread wakes once per second).
+- [x] `# end reason=shutdown` appears after the console powers itself off at 0 % (sessions 0001, 0002, 0004).
+- [x] `# end reason=shutdown` after a normal (manual) power-off.
+- [x] `cutoff` recovery works after pulling the battery (or holding power).
+- [x] Sleep (closing the lid) produces a `# sleep gap=` line. (Whether `svcGetSystemTick` stops during sleep is
+  still not known; the gap is the larger of the tick and the wall-clock gap, so it is detected either way.)
+- [x] Charger plug-in ends the session.
+- [x] No noticeable effect on games (thread wakes once per second).
+- [x] Session numbers are not reused after deleting a session (`last_session`, section 18).
 
 ## 10. Findings from session 0001
 
@@ -497,8 +532,8 @@ Conclusions:
 | `scripts/build_curve.py` | Host reference implementation (Python 3, stdlib only) |
 | `tests/battery/` | Host test: compiles `battery_curve.c` natively and compares it with `build_curve.py` |
 
-No upstream (non-battery) files changed. The recorder thread loads `curve.bin` once after its
-5 s boot delay. Static RAM: about 12 KiB (two 2 KiB curve buffers, build state); no heap.
+No upstream (non-battery) files changed. `curve.bin` is loaded once at boot, as soon as the SD card can be
+opened (since 13.4 by the LED thread; originally by the recorder thread after a fixed 5 s delay). Static RAM: about 12 KiB (two 2 KiB curve buffers, build state); no heap.
 
 ### 11.2 Algorithm
 
@@ -649,13 +684,36 @@ real remaining charge down to 0.
 
 ### 11.7 To verify on hardware
 
-- [ ] Build curve from session 0001: summary matches the table above (MCU 10 % → 33.1 %).
-- [ ] `curve.bin` on SD is byte-identical to `scripts/build_curve.py --bin` on the same CSV.
-- [ ] Build time and UI: progress screen updates, no freeze; menu stays responsive afterwards.
-- [ ] Graph: layout, colours and zoom on the real screen.
-- [ ] Status shows "Corrected" after a reboot (curve loaded by the recorder thread at boot).
-- [ ] Selection survives a reboot (`curve_select.ini`).
-- [ ] No effect on the recording session / games (Rosalina RAM use grew by ~12 KiB static).
+All checked on hardware (New 3DS XL) for the release v13.5-gauge.1; the curve in use is built from 0001 + 0002.
+
+- [x] Build curve from session 0001: summary matches the table above (MCU 10 % → 33.1 %).
+- [x] `curve.bin` on SD is byte-identical to `scripts/build_curve.py --bin` on the same CSV.
+- [x] Build time and UI: progress screen updates, no freeze; menu stays responsive afterwards.
+- [x] Graph: layout, colours and zoom on the real screen.
+- [x] Status shows "Corrected" after a reboot (curve loaded at boot; by the LED thread since 13.4).
+- [x] Selection survives a reboot (`curve_select.ini`).
+- [x] No effect on the recording session / games (Rosalina RAM use grew by ~12 KiB static).
+
+### 11.8 Heavy-load validation (session 0004)
+
+Session 3 of the 12.10 plan, recorded as **0004** (recorder v2, Power LED corrected, curve from 0001 + 0002): **full
+3D**, from MCU 97.2 % to automatic power-off (`# end reason=shutdown`) in **3.8 h** (3 h 46 min, 1357 samples).
+Sessions 0001 / 0002 at 3D off ran ~7.3 h (7.47 h / 7.21 h).
+
+- **Curve vs reality.** The curve from 0001 + 0002 stayed within **~7 points** of 0004's real remaining charge
+  (time-based, as in 11.2). The worst part is around stock 12–26 %, where it reads ~7 points high. A recheck of the
+  CSVs' first crossings gives the same picture, with the gap staying at ~7–7.7 points down to stock 5 %. The
+  **stock gauge** was off by **15–18 points** there (stock 10 % ≈ 26 % real).
+- **LED.** Solid red came **32 min** before shutdown (corrected 9.95 %, MCU 1.70 %), blinking **16 min** before
+  (corrected 2.97 %, MCU 1.00 %). Light play gets 44 / 14 min (12.8). `reasserts` stayed **0** for the whole
+  session, so the MCU never took the LED back at its 10 / 5 % events with the override on.
+- **Load dependence.** Below about stock 50 %, the heavy load leaves **~6–7 points less real charge** than
+  0001 / 0002 at the same stock reading. Above stock ~60 % they agree within ~3 points. So one curve can't fit both
+  loads. Including a heavy session in the build averages the two, and the curve becomes slightly conservative for
+  light play: the LED goes red a little early.
+- **Decision.** The curve is kept from **sessions 1 + 2** (light play is the normal use on this console). At heavy
+  load the LED turns red later than ideal, but still about half an hour before shutdown. The time-left estimate
+  (17) follows the actual drain either way.
 
 ## 12. LED control (milestone 4)
 
@@ -671,9 +729,14 @@ real remaining charge down to 0.
 | `tests/battery/led_host_test.c` | LED unit tests + replay of recorded sessions |
 | `tests/battery/sd_host_test.c`, `tests/battery/host_sd/` | Console SD code (session parser, curve builder, safe write) on host stubs |
 
-Upstream file changed: `sysmodules/rosalina/source/main.c` only — the LED thread start + join, one
-`BatteryLed_HandleNotification()` call in each of the sleep, shell and pre-termination handlers, and
-three notification table entries (`0x108`, `0x211`, `0x212`).
+Upstream file changed by milestone 4: `sysmodules/rosalina/source/main.c`. It gets the LED thread start + join,
+one `BatteryLed_HandleNotification()` call in each of the sleep, shell and pre-termination handlers, and three
+notification table entries (`0x108`, `0x211`, `0x212`). Across the whole fork, four upstream files are changed
+(`git diff --stat v13.5..HEAD`, leaving out `source/battery`, `include/battery`, docs, scripts and tests):
+- `main.c`: the above, plus the recorder thread start + join from milestone 2;
+- `menus.c`: the `Battery Manager...` entry;
+- `menu.c`: the footer, 16.6 / 16.13;
+- the Rosalina `Makefile`: `source/battery` in `SOURCES`.
 
 Static RAM: 2 KiB thread stack + ~0.5 KiB state. Measured stack use (`-fstack-usage`): the deepest
 battery frame on the LED thread is ~100 bytes, so 2 KiB leaves ample room for the libctru / FS calls.
@@ -693,15 +756,16 @@ battery frame on the LED thread is ~100 bytes, so 2 KiB leaves ample room for th
   (`0x00020082`) in battery code. The other `MCUHWC_WriteRegister` calls in the binary are upstream
   Rosalina's (`0x28` LED brightness, `0x18` IRQ mask for the power button option, `0x60` in
   `LumaConfig_SaveMcuConfig`), unchanged.
-- **WriteRegister (IPC `0x00020082`, size 1) rather than `SetPowerLedState`.** Sources: libctru
+- **WriteRegister (IPC `0x00020082`, size 1) rather than mcu::HWC `SetPowerLedState`.** Sources: libctru
   (`mcuhwc.h` and the disassembled `libctru.a`), 3dbrew "MCU Services" and "I2C Registers" (saved
   copies). libctru's `MCUHWC_SetPowerLedState` sends header `0x00060080` (2 parameter words, only one
   filled in), while 3dbrew lists mcu::HWC command 6 as `0x00060040` **SetPowerLEDPattern** (1 word).
   Header and name disagree, and nothing documents whether the MCU sysmodule writes only the mode byte or
   also the red-pattern bytes for it. WriteRegister with size 1 is exactly one byte to `0x29` by
   construction, uses the same command upstream Rosalina already uses for `0x28`, and the read side uses
-  the same register. The mcu::RTC command `0x002E0000` "SetPowerModeIndicatorState" was not used:
-  mcu::RTC is ptm's session, and the header (no parameters) looks wrong.
+  the same register. The mcu::RTC command `0x2E` SetPowerLedState was not used either, because mcu::RTC is ptm's
+  session. It is the command ptm itself uses (14.1), with header `0x002E0040` and the mode as its one parameter;
+  3dbrew lists it as `0x002E0000` SetPowerModeIndicatorState.
 - "Automatic" (0) is only ever written to undo our own earlier write: if nothing was written this boot,
   nothing is written (also not at boot, sleep or shutdown). Since section 13, sleep and shutdown no
   longer write automatic at all.
@@ -751,6 +815,10 @@ Updated by section 13 (charging, lid, shutdown):
   (automatic is written, retried every 5 s if writing fails) and Status shows the error in red.
   Toggling the override clears it. Note: with Rosalina's "LED brightness" at 0 the blue intensity reads
   0 and blue would always look like a mismatch, so this would end in the error state.
+- **MCU reads failing** (section 18, R1): after 3 failed reads in a row (`BATTERY_LED_READ_FAIL_HANDBACK`) while we
+  own the LED, automatic is written once. This is not done while sleep is pending. It matches the HOME Menu bars,
+  which go stock after 3 failed reads. The next good read resumes normal control. The charger unplug debounce
+  counts only decisions with a fresh MCU sample.
 
 ### 12.4 Polling and the `mcu::HWC` session
 
@@ -789,6 +857,7 @@ Rosalina's notification thread (main.c) calls `BatteryLed_HandleNotification()`;
 |---|---|
 | `0x214` shell closed (NS) | lid closed: write automatic (if we had written something) |
 | `0x101` sleep requested (ptm) | same, before Rosalina replies to the sleep query, so ptm's sleep animation comes after it |
+| `0x104` going to sleep (ptm) | (since section 14) the last notification ptm waits for before its sleep LED callback: re-check the ptm sleep / wake bytes before the ack. They are normally already right from `0x214` / `0x101`, and then nothing is mapped or written |
 | `0x213` shell opened (also at boot), `0x102` sleep denied, `0x106` fully awake | clear the flags, wake the thread, which re-applies the mode |
 | `0x212` / `0x211` battery low / very low (ptm) | fast polling for 10 s |
 | `0x108` shutdown (ptm), `0x2000` pre-termination (pm) | write automatic, stop controlling, so the power-off animation works |
@@ -796,7 +865,9 @@ Rosalina's notification thread (main.c) calls `BatteryLed_HandleNotification()`;
 Fallbacks: the thread also treats "`0x0F` bit1 (shell open) clear" as lid closed, and if `0x213` were
 missed it clears the lid flag after 3 polls that see the shell open; on exit the thread writes automatic
 again if needed. Rosalina may subscribe to at most 17 notifications (sm); with the three new entries it
-uses 15.
+uses 15. Only `0x108`, `0x211` and `0x212` are new table entries (12.1). Upstream Rosalina already subscribes to
+`0x101`, `0x102`, `0x104`, `0x106`, `0x213`, `0x214` and `0x2000`, and they reach `BatteryLed_HandleNotification()`
+through its existing sleep, shell and pre-termination handlers.
 
 ### 12.6 Settings (`/luma/battery/config.ini`)
 
@@ -890,11 +961,12 @@ times in session 0001 (voltage recovery in the plateau) and 2 times in 0002.
 ### 12.9 Risks and limits
 
 - Whether the MCU / ptm takes the LED back at 10 / 5 % (or after wake) is unknown until tested; the
-  re-assert logic handles it, at the cost of a brief flash of the system's colour.
+  re-assert logic handles it, at the cost of a brief flash of the system's colour. *Answered: the MCU doesn't
+  (0 re-asserts in 13.1 and in session 0004, 11.8); ptm does at sleep and wake (section 14).*
 - The `0x29` read-back may not reflect writes ("dynamic" register); it is then ignored.
 - If anything goes wrong: switch the override off (writes automatic), or boot the official Luma
   `boot.firm`; a reboot / power cycle also hands the LED back to the system (the MCU is never told
-  anything persistent, and automatic is written on shutdown).
+  anything persistent; since 13.5 shutdown writes "power off" (3) once instead of automatic).
 
 ### 12.10 On-device test checklist
 
@@ -906,7 +978,8 @@ Superseded by [13.8](#138-on-device-checklist); results of this first run in 13.
 3. Build the curve from 0001 + 0002 if not done yet, then switch **LED override: ON**. At a high % the
    LED stays blue; Status: `active`, desired `blue(5)`, re-asserts 0.
 4. Try `blue_mode` 1 in Thresholds once; note whether either mode behaves differently.
-5. Start a recording (session 3), ideally **heavy load: 3D max, high brightness**, override on.
+5. Start a recording (session 3), ideally **heavy load: 3D max, high brightness**, override on. *Done as session
+   0004, see 11.8.*
 6. Watch the MCU 10 % and 5 % crossings (fast polling, `fast poll` in Status): does the red flash? Does
    the re-assert counter go up? Note the "last at" MCU %.
 7. Lid close → the LED shows the normal sleep animation; open → back to the override colour within ~1 s.
@@ -1043,6 +1116,12 @@ The LED stays under control while the adapter is plugged in (`0x0F` bit3) or the
   samples, as before; the corrected % uses the MCU table only while the adapter / flag is raw-set.
 - The level is still tracked internally while charging (MCU table, only better), but only used for the
   lid-closed mode with Sleep LED `off` (red / blinking kept, 12.11). Awake it doesn't affect the LED.
+- **Full-charge rule** (`BATTERY_LED_FULL_MCU_PCT` = 95, `batteryLedChargeLevel` in `battery_led_logic.c`). With the
+  adapter in, the charging flag clear (charging finished) and the MCU % ≥ 95, that internal level is set to
+  **blue** ("fully charged"). Its only effect is that a lid close on the charger with Sleep LED `off` then writes
+  nothing instead of keeping a red / blinking mode from before. It doesn't change the awake LED (blue on the charger
+  anyway), the Sleep LED dim / bright case (blue while charging anyway) or the level after unplugging (the debounced
+  unplug restarts it from the corrected %).
 - The `0x7F` / `0x29` mismatch watch keeps running.
 - Override off / no curve / error / shutdown / LED test: unchanged (automatic only to undo our own write,
   else nothing).
@@ -1066,8 +1145,9 @@ its lock (unchanged; it touches only `state` and the session CSV, the LED thread
 `config.ini`, so they don't race).
 
 Expected takeover: about as soon as the mcu sysmodule is up plus ≤ 200 ms, estimated **~1–2 s after
-Rosalina starts** (was ≥ 6 s). Not measured yet: Status shows a line `Boot s: Rosalina X SD Y 1st LED Z`
-(seconds since the ARM11 tick counter started, ≈ power-on) when there are no write failures. The red
+Rosalina starts** (was ≥ 6 s). Diagnostics 1/4 shows the real figures in `Boot s: Rosalina X, SD Y` and
+`First s: MCU read …, LED …` (seconds since the ARM11 tick counter started, ≈ power-on). The boot behaviour is
+tested on hardware (13.8 step 5); this document records no single measured figure. The red
 blinking before Rosalina runs (boot ROM, boot9strap, Luma, kernel start) is unavoidable: nothing of ours
 runs then, and the MCU is in automatic after a power cycle.
 
@@ -1086,7 +1166,7 @@ A one-way latch, `BatteryLedGate` (pure code, host-tested), sits in front of eve
   or after the LED test screen, writing 3 is still better than leaving our mode or writing 0.
 - Risk: on a **reboot** without `0x108`, mode 3 is written at pre-termination. If the MCU keeps it over
   the reboot, the LED may stay in "power off" mode until our thread writes again (~1–2 s after Rosalina
-  start with the override on). To check on hardware (13.8).
+  start with the override on). Checked on hardware (13.8 step 7): the LED is back to normal on the next boot.
 
 ### 13.6 Code
 
@@ -1122,11 +1202,14 @@ than 3 decisions, 20 times) → always blue; unplugging at a red level → red a
 blue level → blue, at the blink level → blink; and a fake-thread sleep cycle while charging at red / blink /
 blue × `blue_mode` 5 / 1 × Sleep LED dim / bright: sleep byte = Sleep LED value, wake byte = `blue_mode` =
 what the thread wants after wake (no write, no re-assert). The old "only better while charging" and
-"fully charged → blue" expectations are gone (the LED is blue on the charger anyway); the old sleep case
+"fully charged → blue" expectations for the awake LED are gone (the LED is blue on the charger anyway; the internal
+full-charge rule of 13.3 is still in the code and only matters for a lid close with Sleep LED `off`); the old sleep case
 "charging at red → wake → thread writes 4" now expects blue to stay. The replays are unchanged (the
 session CSVs are discharges).
 
 ### 13.8 On-device checklist
+
+All steps passed on hardware (2026-11-16). Step 4 is superseded (see there).
 
 1. **LED test 2 and 3 first**: write 5, then 2 (sleep animation?), then 3 (what does "power off" look
    like: fade, off?). Note the `0x29` read-back. Then 0 and leave the screen.
@@ -1134,8 +1217,10 @@ session CSVs are discharges).
    ~1–2 s after Rosalina).
 3. **Lid** close → the Sleep LED setting (13.9, default dim blue) instead of red blinking; open → blue
    within ~1 s.
-4. **Charger** plugged in → stays blue (Status `charging`); with a red level it may turn blue once the
-   MCU-table corrected % is 0.5 above the threshold; never worse. Unplug → normal discharge logic.
+4. *Superseded by milestone 4e (13.3): on the charger the LED is always `blue_mode`, at any level; the old
+   expectation "with a red level it may turn blue once the MCU-table corrected % is 0.5 above the threshold" no
+   longer applies.* **Charger** plugged in → blue (Diagnostics `charging`). Unplug → normal discharge logic after
+   the ~3 s debounce.
 5. **Boot** (cold, override on): red blinking only until shortly after Rosalina starts.
 6. **Power off** from HOME → the normal power-off animation, **no** red flashing after it.
 7. **Reboot** (Rosalina menu → Reboot) → LED back to normal on the next boot.
@@ -1318,9 +1403,11 @@ written; both bytes are written in the same mapping):
 
 1. `OpenProcessByName("ptm")` (Rosalina's `process_patches.c`; it opens the processes one at a time and
    closes every handle except ptm's). Not found → `off: no ptm`, retried at the next apply.
-2. Title ID via `svcGetProcessInfo(..., 0x10001)` must be `0004013020002202` or `0004013000002202` (the
-   running codeset may carry the ID without the N3DS bit). Else → `off: title id` for the rest of the
-   boot. The code checks below are what identify the binary; the Old 3DS ptm fails them.
+2. Title ID via `svcGetProcessInfo(..., 0x10001)` must be `0004013020002202`, or `0004013000002202` (how the
+   running codeset reports it, without the N3DS bit) **only on a New 3DS** (`isN3DS`,
+   `BatteryPtmPatch_TitleAllowed`, since section 18). Else → `off: title id` for the rest of the boot. So the Old
+   3DS / 2DS ptm (`0004013000002202` on an Old 3DS) is refused by its title ID already; the code checks below are
+   what identify the binary.
 3. `.text` start (`0x10005`) must be `0x00100000` and `.text` size (`0x10002`) must cover `0x101a2e`
    (the end of the higher pattern). Else → `off: layout` for the rest of the boot.
 4. Map the one page `0x101000` and read both 16-byte windows. Each must equal its pattern exactly except
@@ -1351,7 +1438,9 @@ hid / ir, `plugin/file_loader.c`, `gdb/mem.c`):
 4. Cache maintenance, as Rosalina's GDB stub after writing code: `svcFlushEntireDataCache()` (our writes
    sit in the data cache), then `svcInvalidateEntireInstructionCache()` (drop stale copies of the
    instructions). The kernel's `svcUnmapProcessMemoryEx` does both again.
-5. Read back + verify, `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path.
+5. Read back + verify, `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path. If the unmap fails, the patch
+   goes to `off: unmap error` (with the result code) for the boot and nothing is mapped or written again
+   (section 18, R4).
 
 Serialized by its own lock and called with the LED lock held, so the decision and the write can't be
 reordered between the notification, menu and LED threads. Stack: ~0.5 KiB on top of the caller
@@ -1413,13 +1502,14 @@ thread's writes; a real sleep halts the thread within a second or two).
 - **Gone at reboot.** Nothing is written to NAND, firmware, the SD card (no patch file, no
   `/luma/sysmodules`, no loader change) or any other process. ptm's code is loaded fresh from NAND at every
   boot.
-- **ptm still sends its own commands.** `SetLedBrightness` / `SetPowerLedState` are unchanged; we only
+- **ptm still sends its own commands.** mcu::RTC `0x30` SetLedBrightness / `0x2E` SetPowerLedState are unchanged; we only
   change the mode value in them. The brightness bytes are part of the verified patterns.
-- **Refuses on anything unexpected.** Another firmware version, an Old 3DS ptm or a different layout turns
-  both patches off for the boot; the patterns are never searched for elsewhere.
+- **Refuses on anything unexpected.** Another firmware version, an Old 3DS ptm (refused by its title ID, 14.3),
+  a different layout or a failed unmap turns both patches off for the boot; the patterns are never searched for
+  elsewhere.
 - Verified on the build (`arm-none-eabi-objdump -d rosalina.elf`): the only stores in
   `BatteryPtmPatch_Apply` that don't go to its own state (`g_ptm`) or stack are
-  `strbne r7, [r3, #40]` with `r3 = 0x0E800A00` (= `0x0E800A28`, the mapped `0x101a28`) and
+  `strbne r8, [r3, #40]` (register as in the release build; earlier builds used `r7`) with `r3 = 0x0E800A00` (= `0x0E800A28`, the mapped `0x101a28`) and
   `strb r6, [r3, #158]` with `r3 = 0x0E800900` (= `0x0E80099E`, the mapped `0x10199e`), both between the
   verification and `svcFlushEntireDataCache`. `BatteryPtmPatch_Apply` is called only from
   `batteryLedPtmPatchLocked` (itself called from `batteryLedThreadMain`, `BatteryLed_SetConfig` and
@@ -1626,8 +1716,9 @@ Nothing after a shutdown signal (the bytes are gone at the next boot anyway), no
    whitelists; anything else → nothing happens.
 2. Off for this boot, or `state OK` with exactly these bytes → nothing (no mapping).
 3. `OpenProcessByName("ptm")`; not found → `off: no ptm` (retried).
-4. Title ID `0004013020002202` or `0004013000002202`, `.text` at `0x00100000` with a size covering `0x106f64`
-   (end of window A). Else `off: title id` / `off: layout` for the boot.
+4. Title ID `0004013020002202`, or `0004013000002202` only on a New 3DS (the same check as 14.3), `.text` at
+   `0x00100000` with a size covering `0x106f64` (end of window A). Else `off: title id` / `off: layout` for the
+   boot.
 5. `svcMapProcessMemoryEx(CUR_PROCESS_HANDLE, 0x0E810000, ptm, 0x104000, 0x3000, 0)`: the three pages
    `0x104000`–`0x106fff` (window B on the first, window A on the third; all `.text`), read-write. **Scratch VA
    `0x0E810000`–`0x0E812FFF`**, separate from section 14's `0x0E800000`–`0x0E800FFF` (a `_Static_assert` keeps them
@@ -1639,7 +1730,8 @@ Nothing after a shutdown signal (the bytes are gone at the next boot anyway), no
    `svcFlushEntireDataCache()` + `svcInvalidateEntireInstructionCache()` (as section 14 / Rosalina's GDB stub).
 8. Read back both windows, verify again, and require A8 = B8 = cmp and A12 = B12 = movs; else `write error`
    (retried).
-9. `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path.
+9. `svcUnmapProcessMemoryEx`, `svcCloseHandle` on every path; a failed unmap → `off: unmap error` for the boot
+   (section 18, R4).
 
 **Locking.** The bars patch has its own `LightLock` and state (`g_bars`), section 14 its own (`g_ptm`). Both are
 only called with the LED lock (`g_led.lock`) held, so in practice they are serialized; the separate scratch VAs mean
@@ -1710,7 +1802,7 @@ section 16; before, the write count was cut off).
     `0x0E810CD8`, `0x0E810CDC`; the value is the whitelisted cmp / movs byte. All other stores in
     `BatteryBars_Apply` go to `g_bars` or the stack.
   - Section 14 unchanged: `strbne r8, [r3, #40]` (`r3 = 0x0E800A00`) and `strb r6, [r3, #158]`
-    (`r3 = 0x0E800900`) in `BatteryPtmPatch_Apply`.
+    (`r3 = 0x0E800900`) in `BatteryPtmPatch_Apply` (the same as 14.7; rechecked on the release build).
   - `BatteryBars_Apply` is called only from `batteryLedBarsLocked` (only from `batteryLedThreadMain`);
     `BatteryPtmPatch_Apply` only from `batteryLedPtmPatchLocked`; `BatteryMcu_SetPowerLedMode` only from
     `batteryLedWriteLocked`; the `WriteRegister` header `0x00020082` appears in battery code only in
@@ -1767,20 +1859,25 @@ Last run: `PASS` (with sessions 0001 + 0002 and the dump).
 
 ### 15.9 On-device test plan
 
-Curve built, LED override on (for step 2), Battery bars `corrected` (default). Note the `bars patch:` line and the
-corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off:` → note it and stop.
+Tested on hardware (15.11). Names as in the current menu (section 16).
 
-1. **HOME Menu bars vs. corrected %.** At several levels (e.g. c ≈ 80, 55, 30): Status `fed L=5 / 4 / 3`, and after
-   `shared` has caught up, HOME Menu shows 4 / 3 / 2 bars. Optionally lower `bars_4` / `bars_3` in Thresholds to
-   see a change without waiting.
-2. **Red bar with the red LED.** Raise `red_pct` above c (or wait for a real red level): the LED goes red and Status
-   shows `fed L=2` at the same time; HOME Menu then shows 1 red bar. Same for blinking with `blink_pct` above c
-   (`L=1`, blinking bar). Lower the thresholds again: back with the LED's 0.5-point hysteresis.
-3. **Charging → held.** Plug in: `fed L=x (charging, held, ...)` within a poll, same bars (with HOME Menu's charging
-   icon). Unplug at a low MCU %: no red bar and no low-battery notification; `fed L=x` after ~3 s.
-4. **Setting off → stock.** Menu `Battery bars` → `stock`: `stock (off)`, `shared` back to the stock level after the
-   next tick; on again → `fed`.
-5. **Tick latency.** After a change (e.g. step 1 with a threshold edit), time how long Status shows
+Curve built, Settings > Power LED `corrected` (for step 2), Settings > HOME Menu bars `corrected` (default). Note
+the `HOME Menu bars patch (ptm):` lines (Advanced > Diagnostics 2/4) and the corrected % (Diagnostics 1/4, or the
+right-hand value of the footer's `stock%→corrected%`) at each step. Anything with `off:` → note it and stop.
+
+1. **HOME Menu bars vs. corrected %.** At several levels (e.g. c ≈ 80, 55, 30): Diagnostics `fed L=5 / 4 / 3
+   (shared …)`, and after `shared` has caught up, HOME Menu shows 4 / 3 / 2 bars. Optionally lower `4 bars from` /
+   `3 bars from` in Settings to see a change without waiting.
+2. **Red bar with the red LED.** Raise `Red LED at` in Settings above c (or wait for a real red level): the LED goes
+   red and Diagnostics shows `fed L=2` at the same time; HOME Menu then shows 1 red bar. Same for blinking with `blink_pct` above c
+   (`L=1`, blinking bar; `Blinking red at` in Settings). Lower the thresholds again: back with the LED's 0.5-point
+   hysteresis.
+3. **Charging → held.** Plug in: `fed L=x (held), shared y, writes n` within a poll, same bars (with HOME Menu's
+   charging icon). Unplug at a low MCU %: no red bar and no low-battery notification; `fed L=x (shared y)` after
+   ~3 s.
+4. **Setting off → stock.** Settings > `HOME Menu bars` → `stock`, B: `stock (off), shared y, writes n`, `shared`
+   back to the stock level after the next tick; on again → `fed`.
+5. **Tick latency.** After a change (e.g. step 1 with a threshold edit), time how long Diagnostics shows
    `fed L=x (shared y)` with x ≠ y, and when HOME Menu's icon changes. Also check after a sleep / wake (copy A runs
    at the end of the wake callback).
 
@@ -1797,7 +1894,8 @@ corrected % (Status, or the menu footer `c..%`) at each step. Anything with `off
 - **Held while charging**: the bars show the level from before charging (not raised by the charge) until the
   unplug debounce is over.
 - **At MCU 0 %** both copies still give level 0 (shutdown semantics), whatever the corrected % says.
-- The patch only knows the New 3DS ptm version analysed here; any other binary → `off: mismatch`, stock bars.
+- The patch only knows the New 3DS ptm version analysed here: the Old 3DS / 2DS ptm → `off: title id`, any other
+  New 3DS ptm build → `off: mismatch`; stock bars in both cases.
 
 ### 15.11 On-device results
 
@@ -1820,8 +1918,8 @@ screen, the Diagnostics pages and the voltage change (16.11–16.15) are **teste
 ### 16.1 Tree
 
 See 4.2. The main menu has four entries (Settings, Learning..., Setup guide, Advanced...). No item title depends
-on `config.ini` any more (`BatteryMenu_Update*Title` are gone; they showed the defaults until the config loaded
-about 5 s after boot). The only dynamic title is Learning's first entry, `Start recording` or `Stop recording
+on `config.ini` any more (`BatteryMenu_Update*Title` are gone; they showed the defaults until the config was
+loaded at boot, originally after a fixed 5 s delay, since 13.4 as soon as the SD card can be opened). The only dynamic title is Learning's first entry, `Start recording` or `Stop recording
 #0005  1:23:05`: a static buffer padded to 34 characters, refreshed by the item's visibility callback, which
 `menuDraw` calls on every redraw (about once a second).
 
@@ -1945,7 +2043,8 @@ ptm patch site or value, no menu code calling `BatteryPtmPatch_Apply` / `Battery
 2. Settings: change each row with Left / Right (limits as before), SELECT undoes, B shows `Saved.`; reopen: values
    kept; check `config.ini`. Change nothing and press B: `config.ini` not rewritten (timestamp). Power LED
    corrected → the LED follows as before; HOME Menu bars stock / corrected → the icon follows within ~8 s.
-3. Advanced > Blue LED type 1 / 5 behaves like the old Thresholds row.
+3. Advanced > Blue LED type: `forced blue (1)` / `red off, blue on (5)`; the LED uses the selected mode (Diagnostics
+   1/4 `LED desired: blue(1)` / `blue(5)`).
 4. Learning: Start recording at < 95 % warns; B cancels, A starts; on the charger it explains and doesn't start.
    The entry turns into `Stop recording #NNNN h:mm:ss` and the time ticks; Stop asks first.
 5. Sessions: `*` on the curve's sessions; Y on one of them warns in red; delete a test session → green feedback;
@@ -1953,7 +2052,8 @@ ptm patch site or value, no menu code calling `BatteryPtmPatch_Apply` / `Battery
 6. Build curve: X asks; B cancels without rebuilding; A builds and says the previous curve was kept; Advanced >
    Restore previous curve shows both curves and swaps them (twice = back). `curve.bak` is next to `curve.bin`.
 7. Setup guide ticks match the state.
-8. Advanced > Diagnostics as Status before (no line cut off; °F if Rosalina is set to °F).
+8. Advanced > Diagnostics shows every value of the former Status screen (no line cut off; °F if Rosalina is set to
+   °F); since 16.12 / 16.16 on four pages.
 
 ### 16.10 Deferred
 
@@ -1965,7 +2065,8 @@ All three are done in 16.11–16.13.
 ### 16.11 Home screen
 
 The Rosalina entry `Battery Manager...` is now a `METHOD` (`BatteryMenu_Home`) instead of a `MENU`: a custom screen
-with a live summary, a hint, and the four former main-menu entries. Example (curve, Power LED corrected):
+with a live summary, a hint, and the four former main-menu entries. Example (curve, Power LED corrected; the values
+are illustrative, the session count matches the release state of the test console: curve from 0001 + 0002):
 
 ```
 Battery Manager
@@ -1976,7 +2077,7 @@ Battery Manager
  Power LED    blue         corrected
  HOME bars    2 of 4       corrected
  Sleep LED    dim blue
- Curve        3 sessions
+ Curve        2 sessions
  Recording    off
 
 
@@ -2044,13 +2145,15 @@ First run (defaults: no curve, Power LED stock), with the hint in teal:
 
 ### 16.12 Diagnostics in three pages
 
-(A fourth page, `Time left and config.ini`, was added in 16.16; the titles now read `1/4` … `4/4`.)
+(A fourth page, `Time left and config.ini`, was added in 16.16; the titles read `1/4` … `4/4`, as in the mockups
+below. The values are illustrative; the session numbers match the release state of the test console: sessions
+0001, 0002 and 0004 on the SD card, curve from 0001 + 0002.)
 
 Left / Right or L / R switch pages (wrapping); the page is in the title; refreshed every second as before; each
 page is padded to the 17 body lines and the screen is cleared on a page change, so no line of another page stays.
 
 ```
-Diagnostics 1/3 - Gauge and LED
+Diagnostics 1/4 - Gauge and LED
 
 MCU charge:     3.6%  (stock gauge)
 Corrected:      29.9%  (volt median 185.0 raw)
@@ -2070,7 +2173,7 @@ First s:        MCU read 5.0, LED 5.0
 ```
 
 ```
-Diagnostics 2/3 - Sleep LED and ptm patches
+Diagnostics 2/4 - Sleep LED and ptm patches
 
 Sleep setting:  dim blue
 Last sleep:     wrote 1 / wake read 1, n=3
@@ -2087,16 +2190,16 @@ ptm title ID:   0004013020002202
 ```
 
 ```
-Diagnostics 3/3 - Recorder and curve
+Diagnostics 3/4 - Recorder and curve
 
 Recorder:       idle
-Last:           #0004, 6:41:10, 2406 samples
+Last:           #0004, 3:46:08, 1357 samples
 
 Sleep gap:      no
 Errors:         0 read, 0 write (0x00000000)
 
-Curve:          3 sessions, max spread 1.20
-Sessions:       #0001 #0002 #0003
+Curve:          2 sessions, max spread 1.60
+Sessions:       #0001 #0002
 Outliers:       0 (deviation > 5 points)
 Backup:         curve.bak, 2 sessions
 ```
@@ -2153,6 +2256,8 @@ and `BatteryLed_SetConfig`.
 
 ### 16.15 On-device test plan (home screen, Diagnostics pages)
 
+Tested on hardware (2026-11-16).
+
 1. Rosalina > Battery Manager... opens the home screen; the summary values match Diagnostics (corrected %, stock
    gauge, charger) and the footer of the Rosalina menu (voltage, temperature; also in °F).
 2. Leave it open for a minute: values update every second, no leftover characters (e.g. stock gauge 10.0 → 9.9 %,
@@ -2166,7 +2271,8 @@ and `BatteryLed_SetConfig`.
    start a recording → `Recording: don't close the lid or charge ...` and the Recording row shows `#NNNN h:mm:ss`;
    with no curve (rename `curve.bin` on the SD card, reboot) → the charge / record hint; restore it afterwards.
 6. Sleep LED row in teal `(needs Power LED)` while the Power LED is stock.
-7. Advanced > Diagnostics: Left/Right and L/R switch 1/3 → 2/3 → 3/3 → 1/3 (and back), the title shows the page,
+7. Advanced > Diagnostics: Left/Right and L/R switch 1/4 → 2/4 → 3/4 → 4/4 → 1/4 (and back; 4/4 since 16.16), the
+   title shows the page,
    no line of another page remains; every value of the former screen is there (compare with 12.7, 14.5, 15.6).
    Page 1: both voltages; the boot and first-write timings show even while `LED error` is not `none`.
 8. The footer now shows 4.20 V (not 4.19 V) when Diagnostics says raw 210.
@@ -2234,7 +2340,7 @@ value, count and name; expected texts; the note's seen / saved rules; page 4 fit
 Safety: no new write. The report is RAM only; `config.ini` is written only by the existing save. The reset only
 changes the editor's copy of the settings.
 
-On-device test plan:
+On-device test plan (tested on hardware, all steps):
 
 1. Put `red_pct=0`, `led_override=yes` and `foo=1` into `/luma/battery/config.ini`, reboot. Home screen: teal
    ` config.ini: 2 values replaced (see Diagnostics)`. Diagnostics 4/4: the two lines above plus
@@ -2381,6 +2487,9 @@ the poll already read; the menu only reads `BatteryLed_GetStatus`.
 
 ### 17.6 On-device test plan
 
+Tested on hardware: the estimates were plausible, the provisional `~Xh YYm?` appears right after a wake and turns
+into the normal estimate about 10 minutes later.
+
 1. With a curve, on battery: the home screen shows `calculating  (10 min on battery)` and, after about 10 minutes,
    `~Xh YYm`. Compare with the clock: after 30 more minutes the value should have dropped by about 30 minutes
    (± 10) at the same load.
@@ -2394,3 +2503,63 @@ the poll already read; the menu only reads `BatteryLed_GetStatus`.
 4. Advanced > Restore previous curve (or Build curve): `calculating` again.
 5. Without a curve (rename `curve.bin`, reboot): `--  (needs a curve)`.
 6. Raise the load (full brightness, Wi-Fi) for 20 minutes: the estimate falls faster than the clock.
+
+## 18. Release v13.5-gauge.1: fix batch and final validation
+
+A code review of the whole branch before the release found a number of edge cases. They were fixed in one batch
+(`ccdae23` … `cc128c3`), followed by the provisional time left (17.7), Settings > Y reset to defaults, the
+`config.ini` report and Diagnostics 4/4 (16.16). **Everything in this section is tested on hardware** (New 3DS XL,
+iFixit cell).
+
+### 18.1 Fix batch
+
+| Commit | Fix |
+|---|---|
+| `ccdae23` (F5, F6) | `BatteryFs_WriteSafelyKeepOld` keeps the current `curve.bin` when `curve.bak` can't be replaced: it removes the tmp and returns `BATTERY_FS_RES_OLD_NOT_KEPT`, and Build curve / Restore previous curve say so. A short write is an error (`BATTERY_FS_RES_SHORT_WRITE`). |
+| `4552889` (F1, F15) | Session numbers are never reused: `/luma/battery/last_session` (9.2). Deleting a session also removes its `curve_select.ini` line. A sessions directory read error is reported as such, not as "No free session number". |
+| `eaa2ced` (R3, F4) | A curve reload never drops a good curve: the new file is read into a scratch buffer and replaces the live curve only when it validates (no extra RAM). After a good `curve.bin` / `config.ini` load, a leftover `curve.tmp` / `config.tmp` is deleted. |
+| `82b171a` (F3) | A failed end line is retried. The state file becomes `ending=NNNN reason=R`, so the boot recovery writes the real reason. Dropped lines are marked with `# lost lines=<n>` (9.2). |
+| `4d27f12` (F2, F9) | Settings saved while the lid closes or a sleep is requested are written to `config.ini` but become active only after wake (`cfgPending`, 16.16). A `config.ini` save error says the new settings are active until reboot. |
+| `2711ba9` (R1, C2) | The LED is handed back (automatic, once) after 3 failed MCU reads in a row, and the next good read resumes control (12.3). The charger unplug debounce counts only decisions with a fresh sample. |
+| `cc128c3` (S1, R4) | The ptm patches accept only the New 3DS ptm: `0004013000002202` counts only when `isN3DS` (14.3, 15.4). A failed `svcUnmapProcessMemoryEx` turns the patch off for the boot (`off: unmap error`). |
+
+Later commits: `bfa0248` (provisional time left, 17.7); `b01f53d`, `5fcbc71` and `2ca425c` (`config.ini` report,
+Diagnostics 4/4, reset to defaults, 16.16).
+
+### 18.2 Hardware test status
+
+| Feature | Status |
+|---|---|
+| Recorder (sampling, end lines `stop` / `charger` / `shutdown` / `cutoff`, sleep gap, CSV v2) | tested (9.5) |
+| Session numbering via `last_session` (no reuse after deletion) | tested |
+| Curve build, graph, `curve.bak`, Restore previous curve | tested (11.7, 16.4) |
+| Power LED correction (thresholds, hysteresis, charging always blue, shutdown "power off", boot takeover) | tested (13.1, 13.8) |
+| Sleep LED (dim, bright, red kept, blink stock, charging) via the ptm sleep / wake bytes | tested (13.10–13.12) |
+| HOME Menu bars patch (levels, red / blink with the LED, held while charging, low-battery notification) | tested (15.11) |
+| Home screen, Settings, Learning, Advanced, Diagnostics 1/4–4/4, footer voltage | tested (16.9, 16.15) |
+| Time left, including the provisional `~3h 10m?` after a wake | tested (17.6) |
+| Settings saved on a lid close applied after wake; Settings > Y reset to defaults; `config.ini` note | tested (16.16) |
+| Fix batch `ccdae23` … `cc128c3` | tested |
+| Heavy load (full 3D, session 0004): curve accuracy, LED timing, 0 re-asserts | tested (11.8) |
+| Old 3DS / 2DS, New 3DS, New 2DS XL | **not tested** (no hardware). The ptm patches refuse the Old 3DS ptm by title ID. The `0x29` LED correction and the recorder don't depend on the model. |
+
+### 18.3 Limits accepted for the release
+
+Inherent limits (nothing of ours runs before Rosalina or during sleep, only one New 3DS ptm build is known, no access
+to the fuel gauge): 14.10, 15.10. Known and acceptable for a first release:
+
+- **One curve for one kind of load** (11.8). A curve from light play reads up to ~7 points high at full 3D. The
+  curve is not load-aware (4.6).
+- **Learning needs complete discharges** (≥ 95 % to automatic power-off, no sleep). Passive learning from partial
+  play was prototyped and validated on the computer ([passive-learning.md](passive-learning.md)). For now it is not
+  worth building into the console: it needs tens of hours of data, and 11.8 shows that the curve itself moves with
+  load, which mixes the stints.
+- **Voltage scale** (5/256 vs 0.02) still open (16.13); only labels would change. `0x7F[5]` is unidentified.
+- **Time left**: RAM only (lost on reboot); shown on the home screen and Diagnostics 4/4, not in the footer (17.3).
+  No charging-time estimate.
+- **Sessions list and Setup guide read every CSV** (a few seconds with many long sessions); the list shows the 64
+  newest. `curve.bin` v1 holds at most 16 sessions.
+- No battery health / aging indicator.
+- Whether `svcGetSystemTick` runs during sleep is unknown; the recorder and the time-left age cap use the wall clock
+  for that reason (9.5, 17.7).
+- Tested on one console only (18.2).

@@ -13,11 +13,12 @@ and the HOME Menu battery icon. Everything else is plain Luma3DS v13.5.
 
 How it works in detail: [docs/battery-manager.md](docs/battery-manager.md).
 
-**Who it's for:** people with a replacement battery whose LED turns red far too early. It has been tested on
-**one New 3DS XL with an iFixit replacement cell**. The ptm patches (Sleep LED and HOME Menu bars) only match the
-New 3DS ptm system module they were written for. They check the code before every write and switch themselves
-off if it doesn't match. Old 3DS / 2DS models use a different ptm, so LED correction may work there, but the
-Sleep LED and HOME Menu bars will stay stock.
+**Who it's for:** people with a replacement battery whose LED turns red far too early. Every feature has been
+tested on **one New 3DS XL with an iFixit replacement cell**. The ptm patches (Sleep LED and HOME Menu bars) only
+match the New 3DS ptm system module they were written for. They check the title ID and the code before every write
+and switch themselves off if it doesn't match. On an Old 3DS / 2DS they refuse the different ptm by its title ID,
+so the Sleep LED and HOME Menu bars stay stock there. The power LED correction and the recorder don't depend on the
+model, but they haven't been tried on any other console.
 
 ### Features
 
@@ -34,7 +35,11 @@ Sleep LED and HOME Menu bars will stay stock.
   sessions, build, graph), a Setup guide and Advanced (Diagnostics, LED test, restore previous curve, limits).
   The Rosalina footer shows `stock%→corrected%`.
 - **Time remaining:** estimated on the Battery Manager home screen from the recent drain at the current load.
-  Appears after about 10 minutes on battery and resets after charging or sleep. Not shown in the footer.
+  It appears after about 10 minutes on battery. After sleep it continues at once with a provisional value
+  (`~3h 10m?`) until there is fresh data, and it starts over after charging. Not shown in the footer.
+- **Settings safety nets:** Settings → Y resets everything to the defaults (B to save, SELECT to undo). If
+  `config.ini` contained invalid values, the home screen says so once, and Advanced → Diagnostics 4/4 lists what was
+  replaced.
 
 ### Safety model
 
@@ -72,7 +77,12 @@ More sessions give a better curve. Recording tips and every setting: [docs/batte
 - A charger plugged in during sleep has no effect on the LED until the lid opens.
 - The Sleep LED and HOME Menu bars depend on the exact New 3DS ptm version. On any other version they stay stock (see Advanced → Diagnostics).
 - The HOME Menu bars refresh about every 8 s.
-- Learning currently needs complete discharges (from ≥ 95 % to automatic power-off, no sleep). Passive learning from partial sessions is planned.
+- Learning needs complete discharges (from ≥ 95 % to automatic power-off, no sleep). Passive learning from
+  partial play was prototyped on the Mac ([docs/passive-learning.md](docs/passive-learning.md)). It isn't worth
+  building into the console for now.
+- One curve fits one kind of load. At full 3D the test console ran 3.8 h instead of ~7.3 h. Its curve from light
+  play then read up to ~7 points high, where the stock gauge was 15–18 points off, and the red LED still came 32
+  minutes before shutdown.
 
 ---
 

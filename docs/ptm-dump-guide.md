@@ -5,8 +5,8 @@
 
 **Why:** when the lid closes, the power LED blinks red although the Battery Manager writes mode 5
 to MCU register `0x29`. The suspect is the system module **ptm**: late in its sleep sequence it
-probably sends `mcu::RTC` command `0x002E0040` (SetPowerModeIndicatorState, i.e. reg `0x29`) with
-mode 2, and mode 0 on wake. To confirm this before thinking about a loader patch we need ptm's
+probably sends `mcu::RTC` command `0x2E` SetPowerLedState (header `0x002E0040`; 3dbrew calls it
+SetPowerModeIndicatorState, i.e. reg `0x29`) with mode 2, and mode 0 on wake. To confirm this before thinking about a loader patch we need ptm's
 executable code (`.code`) to disassemble on the Mac.
 
 This guide only **reads** from the internal memory (SysNAND) and writes **only to the SD card**
@@ -168,6 +168,9 @@ loader matches patches with the N3DS bit cleared (`sysmodules/loader/source/patc
 > **Outcome:** the dump showed the call site (sleep LED callback at VA `0x101a1c`, mode byte at
 > `0x101a28`) and the wake LED callback (VA `0x101990`, mode byte at `0x10199e`). Both are handled by a
 > Rosalina runtime patch of those bytes in RAM instead of a loader patch, see [battery-manager.md section 14](battery-manager.md#14-ptm-sleep-and-wake-led-patch-milestone-4c).
+> The `0x002E0040` literal is not in the dump: ptm's wrapper at VA `0x1023f0` passes the command number
+> (`movs r1, #0x2e`) and the parameter count (`movs r2, #1`) to a helper that builds the header. The command is
+> called mcu::RTC `0x2E` SetPowerLedState in the rest of the project.
 
 ## Sources
 
@@ -178,6 +181,7 @@ loader matches patches with the N3DS bit cleared (`sysmodules/loader/source/patc
   permission `PERM_BASE` includes SD card writes; the essential-backup start-up prompt embeds
   into the NAND image.
 - [3dbrew Title list](https://www.3dbrew.org/wiki/Title_list) (ptm TIDs),
-  3dbrew MCU Services (`0x002E` SetPowerModeIndicatorState, reg `0x29`).
+  3dbrew MCU Services (command `0x2E`, listed there as `0x002E0000` SetPowerModeIndicatorState, reg `0x29`;
+  called SetPowerLedState in this project).
 - [3ds.hacks.guide](https://3ds.hacks.guide/) (GodMode9 location `luma/payloads/`, START to
   launch).
