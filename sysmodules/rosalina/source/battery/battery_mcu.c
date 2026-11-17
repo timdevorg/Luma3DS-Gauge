@@ -9,8 +9,20 @@
 *   our own local Handle and raw IPC instead of libctru's global mcuHwc handle, so
 *   we can never clobber or close a session that menu.c / sysconfig.c /
 *   luma_config.c opened through mcuHwcInit()/mcuHwcGetSessionHandle().
-*   A LightLock serialises our own users (recorder thread, LED thread, menu thread,
-*   notification handler).
+*
+*   No persistent session: the MCU sysmodule accepts only one session per service at
+*   a time (3dbrew, MCU Services), so holding one would lock everyone else out of
+*   mcu::HWC (docs/battery-manager.md, 12.4).
+*
+*   Shared lock (g_mcuLock, BatteryMcu_LockShared): ONE Rosalina-wide lock taken
+*   around every mcu::HWC open / steal / close in Rosalina: battery code (recorder,
+*   LED thread, menu thread, notification handler) and upstream menu.c
+*   (menuUpdateMcuInfo), luma_config.c and sysconfig.c. Reason: two crash dumps (svcCloseHandle,
+*   kernel pc=0): k11_extension's SERVICEOP_STEAL_CLIENT_SESSION finds the session and
+*   drops its locks before taking a reference, so one Rosalina thread stealing the
+*   session another Rosalina thread is closing got a dangling handle (section 18.4).
+*   Lock order: battery_led's g_led.lock -> g_mcuLock, never the reverse. Nothing
+*   called with g_mcuLock held takes another lock. Not recursive.
 *
 *   Write path: BatteryMcu_SetPowerLedMode() is the only function that sends a write
 *   request. It is hard-wired to reg 0x29, size 1, and to the mode whitelist
@@ -29,11 +41,13 @@
 #define MCUHWC_CMD_READ_REGISTER    0x1 // IPC 0x00010082, as used by libctru MCUHWC_ReadRegister
 #define MCUHWC_CMD_WRITE_REGISTER   0x2 // IPC 0x00020082, as used by libctru MCUHWC_WriteRegister
 
-static LightLock g_mcuLock;
+// Statically initialised (1 = unlocked, as LightLock_Init sets it): menu.c and the shell-open handler can take it
+// before BatteryMcu_Init() runs.
+static LightLock g_mcuLock = 1;
 
 void BatteryMcu_Init(void)
 {
-    LightLock_Init(&g_mcuLock);
+    // Nothing to do: g_mcuLock is statically initialised (re-initialising it here could release it under a holder)
 }
 
 static void batteryMcuLock(void)
@@ -44,6 +58,31 @@ static void batteryMcuLock(void)
 static void batteryMcuUnlock(void)
 {
     LightLock_Unlock(&g_mcuLock);
+}
+
+void BatteryMcu_LockShared(void)
+{
+    batteryMcuLock();
+}
+
+void BatteryMcu_UnlockShared(void)
+{
+    batteryMcuUnlock();
+}
+
+Result BatteryMcu_HwcInitShared(void)
+{
+    batteryMcuLock();
+    Result res = mcuHwcInit();
+    batteryMcuUnlock();
+    return res;
+}
+
+void BatteryMcu_HwcExitShared(void)
+{
+    batteryMcuLock();
+    mcuHwcExit();
+    batteryMcuUnlock();
 }
 
 static Result batteryMcuOpen(Handle *h)

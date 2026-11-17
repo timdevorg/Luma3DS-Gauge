@@ -34,6 +34,7 @@
 #include "menus/miscellaneous.h"
 #include "menus/sysconfig.h"
 #include "plugin/plgloader.h"
+#include "battery/battery_mcu.h"
 
 typedef struct CfgData {
     u16 formatVersionMajor, formatVersionMinor;
@@ -87,12 +88,14 @@ Result LumaConfig_SaveMcuConfig(void)
     buf[0] = LUMA_MCU_CONFIG_FREE_REG_OFFSET;
     memcpy(buf + 1, &lumaMcuConfig, sizeof(LumaMcuConfig));
 
+    BatteryMcu_LockShared(); // Battery Manager: Rosalina-wide mcu::HWC lock (battery_mcu.h)
     Result res = mcuHwcInit();
     if (R_SUCCEEDED(res))
     {
         res = MCUHWC_WriteRegister(0x60, buf, sizeof(buf));
         mcuHwcExit();
     }
+    BatteryMcu_UnlockShared();
 
     return res;
 }

@@ -347,8 +347,9 @@ and the thread start + join in `main.c`.
   `svcControlService(SERVICEOP_STEAL_CLIENT_SESSION)` if the port is full, access, close), but
   with a local handle and raw IPC (`0x00010082` read) instead of libctru's global
   `mcuHwc` handle. That way the recorder can never overwrite or close a handle that
-  `menu.c`, `sysconfig.c` or `luma_config.c` opened. A `LightLock` serialises the recorder
-  thread and the Status screen.
+  `menu.c`, `sysconfig.c` or `luma_config.c` opened. One Rosalina-wide `LightLock`
+  (`BatteryMcu_LockShared`, 12.4) serialises every mcu::HWC open / steal / close in Rosalina, battery code and
+  upstream code alike (18.4).
 - **Reads per sample**: `0x08..0x0F` in one read (3D slider, volume, temperature, % int,
   % frac, voltage, `0x0E`, flags) and the `0x7F` info table (`0x13` bytes) in one read.
   The read wrapper refuses ranges touching `0x05–0x07` and `0x10–0x13` (interrupt bitmask).
@@ -840,6 +841,21 @@ Updated by section 13 (charging, lid, shutdown):
     sharing it is safe, and closing our handle doesn't close the owner's session. Same as upstream
     `menuUpdateMcuInfo()`.
   - mcu::RTC (ptm's) is never opened; shell and adapter state come from `0x0F` via mcu::HWC.
+  - **One Rosalina-wide lock** (`g_mcuLock` in `battery_mcu.c`, exposed as `BatteryMcu_LockShared()` /
+    `BatteryMcu_UnlockShared()`, plus `BatteryMcu_HwcInitShared()` / `BatteryMcu_HwcExitShared()` wrapping
+    libctru's `mcuHwcInit()` / `mcuHwcExit()`) is held around every mcu::HWC session open, steal and close in
+    Rosalina: all battery accesses, upstream `menuUpdateMcuInfo()` (whole function), `LumaConfig_SaveMcuConfig()`,
+    and in `sysconfig.c` the LED brightness write, the MCU IRQ toggle, and the open and close (not the whole window)
+    of the LED brightness and volume windows, which keep libctru's session open while the user is in them. So no
+    Rosalina thread can steal a session that another Rosalina thread is closing (the crash in 18.4). The lock is
+    statically initialised (the shell-open handler can run early) and not recursive.
+  - **Lock order**: battery_led's `g_led.lock` → `g_mcuLock`, never the reverse. Nothing called with `g_mcuLock`
+    held takes another lock or calls into battery_led / the recorder. The notification handler calls
+    `BatteryLed_HandleNotification()` and the shell-open restore (`SysConfigMenu_RestoreSettings()`) one after the
+    other, never nested. Waits on `g_mcuLock` are bounded by a few IPC round trips, so the known bounded priority
+    inversion (notification handler → `g_led.lock` held by the LED thread → `g_mcuLock`) is unchanged in kind.
+  - Still no persistent session (see above: one session per service). Each poll already does its three reads in
+    one session; an LED write, when needed, is one more short session.
 - The LED thread is a sibling of the recorder thread (priority **56**: above the recorder / task runner
   at 58, so an SD flush can't delay it; below the menu at 52; `CORE_SYSTEM`; 2 KiB static stack). It
   runs whether or not a recording is active and waits on `preTerminationEvent` + a kick event.
@@ -2542,6 +2558,19 @@ Diagnostics 4/4, reset to defaults, 16.16).
 | Fix batch `ccdae23` … `cc128c3` | tested |
 | Heavy load (full 3D, session 0004): curve accuracy, LED timing, 0 re-asserts | tested (11.8) |
 | Old 3DS / 2DS, New 3DS, New 2DS XL | **not tested** (no hardware). The ptm patches refuse the Old 3DS ptm by title ID. The `0x29` LED correction and the recorder don't depend on the model. |
+
+### 18.4 Crash fix: mcu::HWC steal vs close (after the release)
+
+Two Luma arm11 crash dumps: process rosalina, core 1, kernel SVC mode, `pc=0`, `lr=fff22068`, inside
+`svcCloseHandle`; callers `menuDraw` → `menuUpdateMcuInfo` (upstream) and `batteryMcuClose`. Cause: since mcu::HWC
+takes one session at a time, when the battery code holds the session, `menu.c` steals it with
+`SERVICEOP_STEAL_CLIENT_SESSION` (and vice versa). In k11_extension, `SessionInfo_FindFirst` drops its locks before
+`createHandleForThisProcess` takes a reference, so a steal racing the owner's close can return a handle to a session
+being destroyed (use-after-free, null vtable on the later close). `g_mcuLock` serialised only battery code.
+
+Fix: the Rosalina-wide lock of 12.4 around every mcu::HWC open / steal / close in Rosalina. k11_extension is not
+changed; a steal racing a close by **another process** (homebrew holding mcu::HWC) is still possible, as upstream,
+but Rosalina no longer races itself.
 
 ### 18.3 Limits accepted for the release
 

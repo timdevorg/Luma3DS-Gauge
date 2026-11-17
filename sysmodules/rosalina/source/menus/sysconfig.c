@@ -33,6 +33,7 @@
 #include "utils.h"
 #include "ifile.h"
 #include "luminance.h"
+#include "battery/battery_mcu.h"
 
 static Menu audioRoutingMenu = {
     "Audio routing menu",
@@ -70,12 +71,14 @@ static Result SysConfigMenu_ApplyLedMasterBrightnessOverride(void)
     // regardless of setting. Note that the red POWER LED is not dimmable.
     u8 brightness = PctOverride_IsActive(override) ? (255 * PctOverride_GetPercentage(override) + 50) / 100 : 255;
 
+    BatteryMcu_LockShared(); // Battery Manager: Rosalina-wide mcu::HWC lock (battery_mcu.h)
     Result res = mcuHwcInit();
     if (R_SUCCEEDED(res))
     {
         res = MCUHWC_WriteRegister(0x28, &brightness, 1);
         mcuHwcExit();
     }
+    BatteryMcu_UnlockShared();
 
     return res;
 }
@@ -113,7 +116,8 @@ void SysConfigMenu_SetLedMasterBrightnessOverride(void)
     Draw_Unlock();
 
     // Keep the mcu::HWC session open while this window is open (the helpers' init/exit then only update the refcount)
-    bool mcuHwcOpened = R_SUCCEEDED(mcuHwcInit());
+    // Battery Manager: open and close under the Rosalina-wide mcu::HWC lock (battery_mcu.h), not the whole window
+    bool mcuHwcOpened = R_SUCCEEDED(BatteryMcu_HwcInitShared());
 
     do
     {
@@ -176,7 +180,7 @@ void SysConfigMenu_SetLedMasterBrightnessOverride(void)
     while(!menuShouldExit);
 
     if (mcuHwcOpened)
-        mcuHwcExit();
+        BatteryMcu_HwcExitShared();
 }
 
 static Result SysConfigMenu_OpenCdcChkSession(void)
@@ -400,9 +404,11 @@ void SysConfigMenu_TogglePowerButton(void)
     Draw_FlushFramebuffer();
     Draw_Unlock();
 
+    BatteryMcu_LockShared(); // Battery Manager: Rosalina-wide mcu::HWC lock (battery_mcu.h)
     mcuHwcInit();
     MCUHWC_ReadRegister(0x18, (u8*)&mcuIRQMask, 4);
     mcuHwcExit();
+    BatteryMcu_UnlockShared();
 
     do
     {
@@ -420,11 +426,13 @@ void SysConfigMenu_TogglePowerButton(void)
 
         if(pressed & KEY_A)
         {
+            BatteryMcu_LockShared();
             mcuHwcInit();
             MCUHWC_ReadRegister(0x18, (u8*)&mcuIRQMask, 4);
             mcuIRQMask ^= 0x00000001;
             MCUHWC_WriteRegister(0x18, (u8*)&mcuIRQMask, 4);
             mcuHwcExit();
+            BatteryMcu_UnlockShared();
         }
         else if(pressed & KEY_B)
             return;
@@ -721,7 +729,8 @@ void SysConfigMenu_AdjustVolume(void)
     Result res = 0;
 
     // Keep the mcu::HWC session open while this window is open (the helpers' init/exit then only update the refcount)
-    bool mcuHwcOpened = R_SUCCEEDED(mcuHwcInit());
+    // Battery Manager: open and close under the Rosalina-wide mcu::HWC lock (battery_mcu.h), not the whole window
+    bool mcuHwcOpened = R_SUCCEEDED(BatteryMcu_HwcInitShared());
 
     do
     {
@@ -832,7 +841,7 @@ void SysConfigMenu_AdjustVolume(void)
     } while(!menuShouldExit);
 
     if (mcuHwcOpened)
-        mcuHwcExit();
+        BatteryMcu_HwcExitShared();
 }
 
 void SysConfigMenu_ChangeScreenBrightness(void)

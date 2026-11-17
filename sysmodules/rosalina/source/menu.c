@@ -204,13 +204,25 @@ static float batteryPercentage;
 static u8 batteryVoltageRaw; // MCU 0x0D
 static u8 batteryTemperature;
 
+static Result menuUpdateMcuInfoLocked(void);
+
+// Battery Manager: the whole open / steal ... close under the Rosalina-wide mcu::HWC lock (battery_mcu.h; a steal
+// racing another Rosalina thread's close crashed in svcCloseHandle, docs/battery-manager.md 18.4)
 static Result menuUpdateMcuInfo(void)
+{
+    if (!isServiceUsable("mcu::HWC"))
+        return -1;
+
+    BatteryMcu_LockShared();
+    Result res = menuUpdateMcuInfoLocked();
+    BatteryMcu_UnlockShared();
+    return res;
+}
+
+static Result menuUpdateMcuInfoLocked(void)
 {
     Result res = 0;
     u8 data[4];
-
-    if (!isServiceUsable("mcu::HWC"))
-        return -1;
 
     Handle *mcuHwcHandlePtr = mcuHwcGetSessionHandle();
     *mcuHwcHandlePtr = 0;

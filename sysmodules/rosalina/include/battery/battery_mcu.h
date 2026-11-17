@@ -51,8 +51,20 @@ typedef struct BatteryMcuSample
     u8 ledMode;      // 0x29, first (mode) byte. A "dynamic" register: may not read back what was written
 } BatteryMcuSample;
 
-/// Must be called once before any other function (from main(), before threads start).
+/// Kept for the call in BatteryRecorder_CreateThread(); the lock is statically initialised.
 void BatteryMcu_Init(void);
+
+/// Rosalina-wide mcu::HWC lock (docs/battery-manager.md, 12.4 and 18.4). Every mcu::HWC session open, steal and
+/// close in Rosalina happens with it held: battery_mcu.c internally, menu.c (menuUpdateMcuInfo), luma_config.c and
+/// sysconfig.c through these. Not recursive. Lock order: battery_led's lock -> this one; never call battery_led /
+/// battery_recorder functions, or take any other lock, while holding it.
+void BatteryMcu_LockShared(void);
+void BatteryMcu_UnlockShared(void);
+
+/// mcuHwcInit() / mcuHwcExit() (libctru, refcounted) under the shared lock, for sysconfig.c's windows that keep the
+/// libctru session open while the user is in them (the lock is held only for the open / close, not the window).
+Result BatteryMcu_HwcInitShared(void);
+void BatteryMcu_HwcExitShared(void);
 
 /// Reads 0x08..0x0F (one read), the 0x29 mode byte and the 0x7F info table using one short-lived session.
 Result BatteryMcu_ReadSample(BatteryMcuSample *out);
